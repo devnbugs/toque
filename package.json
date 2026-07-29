@@ -2,7 +2,14 @@
   "name": "nusuk-request-handler",
   "version": "1.0.0",
   "type": "module",
+  "bin": {
+    "nusuk": "./bin/nusuk.js"
+  },
   "exports": {
     ".": "./src/nusuk.js"
+  },
+  "dependencies": {
+    "cloakbrowser": "^0.5.2",
+    "playwright-core": "^1.62.0"
   }
 }
