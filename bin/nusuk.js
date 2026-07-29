@@ -55,7 +55,7 @@ function findCaptcha() {
 async function cmdBench(args) {
   const count = parseInt(args[0] || "5", 10);
   const authPath = findAuth();
-  const nusuk = authPath ? new Nusuk().loadAuth(authPath) : new Nusuk();
+  const nusuk = authPath ? new Nusuk().loadAuth(authPath).loadEntity() : new Nusuk().loadEntity();
   await nusuk.init();
 
   try {
@@ -98,19 +98,30 @@ async function cmdBench(args) {
 }
 
 async function cmdReq(args) {
-  if (!args.length) {
-    console.error("Usage: nusuk request <path> [method]");
+  const dataIdx = args.indexOf("--data");
+  const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
+  const clean = dataIdx !== -1 ? [...args.slice(0, dataIdx), ...args.slice(dataIdx + 2)] : [...args];
+  const path = clean[0];
+  const method = (clean[1] || (dataStr !== null ? "POST" : "GET")).toUpperCase();
+  if (!path) {
+    console.error("Usage: nusuk request <path> [method] [--data <json>]");
     process.exit(1);
   }
-  const path = args[0];
-  const method = (args[1] || "GET").toUpperCase();
+
+  let payload = undefined;
+  if (dataStr !== null) {
+    try { payload = JSON.parse(dataStr); }
+    catch { payload = dataStr; }
+  } else if (["POST", "PUT", "PATCH"].includes(method)) {
+    payload = {};
+  }
 
   const authPath = findAuth();
-  const nusuk = authPath ? new Nusuk().loadAuth(authPath) : new Nusuk();
+  const nusuk = authPath ? new Nusuk().loadAuth(authPath).loadEntity() : new Nusuk().loadEntity();
   await nusuk.init();
 
   try {
-    const res = await nusuk.request(path, { method });
+    const res = await nusuk.request(path, { method, payload });
     console.log(`status: ${res.status}`);
     if (res.timing) console.log(`timing:`, res.timing);
     if (res.json) {
@@ -152,6 +163,13 @@ async function cmdSchedule(args) {
   const method = methodIdx !== -1 ? args[methodIdx + 1].toUpperCase() : "POST";
   const countIdx = args.indexOf("--count");
   const count = countIdx !== -1 ? parseInt(args[countIdx + 1], 10) || 5 : 5;
+  const dataIdx = args.indexOf("--data");
+  const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
+  let payload = undefined;
+  if (dataStr !== null) {
+    try { payload = JSON.parse(dataStr); }
+    catch { payload = dataStr; }
+  }
 
   if (!targetStr) {
     console.error("Usage: nusuk schedule --target HH:MM:SS [--path /api/endpoint] [--count 5]");
@@ -164,7 +182,7 @@ async function cmdSchedule(args) {
   }
 
   const authPath = findAuth();
-  const nusuk = authPath ? new Nusuk().loadAuth(authPath) : new Nusuk();
+  const nusuk = authPath ? new Nusuk().loadAuth(authPath).loadEntity() : new Nusuk().loadEntity();
   await nusuk.init();
 
   try {
@@ -200,7 +218,7 @@ async function cmdSchedule(args) {
       console.log(`  waiting ${ms(wait)}...`);
       await new Promise((r) => setTimeout(r, wait));
       const sendActual = Date.now();
-      const res = await nusuk.request(path, { method });
+      const res = await nusuk.request(path, { method, payload });
       const responseReceived = Date.now();
       const serverArrival = sendActual + netOneWay;
       const drift = serverArrival - target.getTime();
@@ -230,10 +248,12 @@ nusuk — Nusuk request handler CLI
 
 Usage:
   nusuk bench [count]                  Run latency benchmark
-  nusuk request <path> [method]        Send a request
+  nusuk request <path> [method]        Send a request (POST defaults to {})
+       [--data '{"key":"val"}']
   nusuk schedule --target HH:MM:SS     Schedule request to arrive at server at target time
        [--path /api/path]
        [--method GET]
+       [--data '{"key":"val"}']
        [--count 5]
   nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
   nusuk captcha-show                  Show stored captcha token
@@ -242,6 +262,7 @@ Options:
   --target HH:MM:SS   Server delivery target time (HH:MM:SS.mmm or HH:MM:SS:mmm)
   --path /api/path    API endpoint path (default: SendToIssueVisa)
   --method GET|POST   HTTP method (default: POST)
+  --data <json>       JSON payload for the request body
   --count N           Number of calibration samples (default: 5)
 
 Environment:

@@ -9,6 +9,8 @@ export class Nusuk {
     this.browserOptions = config.browserOptions || { headless: true };
     this.defaultHeaders = {
       Accept: "application/json, text/plain, */*",
+      Origin: config.origin || "https://masar.nusuk.sa",
+      Referer: config.referer || "https://masar.nusuk.sa/umrah/reception-area/dashboard/uo",
       ...(config.defaultHeaders || {}),
     };
     this.browser = null;
@@ -33,6 +35,14 @@ export class Nusuk {
       throw new Error("captcha.json missing captchaToken");
     }
     this.captchaToken = parsed.captchaToken;
+    return this;
+  }
+
+  loadEntity(config = {}) {
+    const id = config.activeEntityId || process.env.ACTIVE_ENTITY_ID;
+    const typeId = config.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID;
+    if (id) this.defaultHeaders["activeentityid"] = String(id);
+    if (typeId) this.defaultHeaders["activeentitytypeid"] = String(typeId);
     return this;
   }
 

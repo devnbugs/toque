@@ -8,7 +8,7 @@ function loadJsonEnv(name) {
 
 async function main() {
   const authPath = process.env.AUTH_PATH || "auth.json";
-  const nusuk = new Nusuk().loadAuth(authPath);
+  const nusuk = new Nusuk().loadAuth(authPath).loadEntity();
   await nusuk.init();
 
   try {
