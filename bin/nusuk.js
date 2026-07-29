@@ -52,6 +52,13 @@ function findCaptcha() {
   return null;
 }
 
+function readCaptchaToken() {
+  const p = findCaptcha();
+  if (!p) return null;
+  try { return JSON.parse(readFileSync(p, "utf8")).captchaToken || null; }
+  catch { return null; }
+}
+
 async function cmdBench(args) {
   const count = parseInt(args[0] || "5", 10);
   const authPath = findAuth();
@@ -100,11 +107,12 @@ async function cmdBench(args) {
 async function cmdReq(args) {
   const dataIdx = args.indexOf("--data");
   const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
-  const clean = dataIdx !== -1 ? [...args.slice(0, dataIdx), ...args.slice(dataIdx + 2)] : [...args];
+  const useCaptcha = args.includes("--captcha");
+  const clean = dataIdx !== -1 ? [...args.slice(0, dataIdx), ...args.slice(dataIdx + 2)] : [...args].filter((a) => a !== "--captcha");
   const path = clean[0];
   const method = (clean[1] || (dataStr !== null ? "POST" : "GET")).toUpperCase();
   if (!path) {
-    console.error("Usage: nusuk request <path> [method] [--data <json>]");
+    console.error("Usage: nusuk request <path> [method] [--data <json>] [--captcha]");
     process.exit(1);
   }
 
@@ -114,6 +122,11 @@ async function cmdReq(args) {
     catch { payload = dataStr; }
   } else if (["POST", "PUT", "PATCH"].includes(method)) {
     payload = {};
+  }
+  if (useCaptcha) {
+    const token = readCaptchaToken();
+    if (!token) console.error("Warning: captcha.json not found or empty");
+    else payload = { ...(payload || {}), captchaToken: token };
   }
 
   const authPath = findAuth();
@@ -192,6 +205,13 @@ async function cmdSchedule(args) {
   if (dataStr !== null) {
     try { payload = JSON.parse(dataStr); }
     catch { payload = dataStr; }
+  }
+
+  const useCaptcha = args.includes("--captcha");
+  if (useCaptcha) {
+    const token = readCaptchaToken();
+    if (!token) console.error("Warning: captcha.json not found or empty");
+    else payload = { ...(payload || {}), captchaToken: token };
   }
 
   if (!targetStr) {
@@ -309,10 +329,12 @@ Usage:
   nusuk bench [count]                  Run latency benchmark
   nusuk request <path> [method]        Send a request (POST defaults to {})
        [--data '{"key":"val"}']
+       [--captcha]
   nusuk schedule --target HH:MM:SS     Schedule request to arrive at server at target time
        [--path /api/path]
        [--method GET]
        [--data '{"key":"val"}']
+       [--captcha]
        [--count 5]
   nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
   nusuk captcha-show                  Show stored captcha token
@@ -322,6 +344,7 @@ Options:
   --path /api/path    API endpoint path (default: SendToIssueVisa)
   --method GET|POST   HTTP method (default: POST)
   --data <json>       JSON payload for the request body
+  --captcha           Include captchaToken from captcha.json in payload
   --count N           Number of calibration samples (default: 5)
 
 Environment:
