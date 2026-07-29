@@ -26,6 +26,16 @@ export class Nusuk {
     return this;
   }
 
+  loadCaptcha(path) {
+    const raw = readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed?.captchaToken) {
+      throw new Error("captcha.json missing captchaToken");
+    }
+    this.captchaToken = parsed.captchaToken;
+    return this;
+  }
+
   async init() {
     this.browser = await launch(this.browserOptions);
     this.page = await this.browser.newPage();

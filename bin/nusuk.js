@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import { Nusuk } from "../src/nusuk.js";
 
@@ -29,6 +29,18 @@ function findAuth() {
     process.env.AUTH_PATH,
     "auth.json",
     resolve(process.cwd(), "auth.json"),
+  ];
+  for (const p of candidates) {
+    if (p && existsSync(p)) return p;
+  }
+  return null;
+}
+
+function findCaptcha() {
+  const candidates = [
+    process.env.CAPTCHA_PATH,
+    "captcha.json",
+    resolve(process.cwd(), "captcha.json"),
   ];
   for (const p of candidates) {
     if (p && existsSync(p)) return p;
@@ -92,6 +104,26 @@ async function cmdReq(args) {
   } finally {
     await nusuk.close();
   }
+}
+
+async function cmdCaptchaSet() {
+  const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
+  const existing = existsSync(captchaPath)
+    ? JSON.parse(readFileSync(captchaPath, "utf8"))
+    : {};
+  existing.captchaToken = process.env.CAPTCHA_TOKEN || "";
+  writeFileSync(captchaPath, JSON.stringify(existing, null, 2) + "\n");
+  console.log(`captchaToken ${existing.captchaToken ? "updated" : "cleared"} in ${captchaPath}`);
+}
+
+async function cmdCaptchaShow() {
+  const captchaPath = findCaptcha();
+  if (!captchaPath) {
+    console.log("captcha.json not found");
+    return;
+  }
+  const data = JSON.parse(readFileSync(captchaPath, "utf8"));
+  console.log(data.captchaToken || "(empty)");
 }
 
 async function cmdSchedule(args) {
@@ -168,6 +200,8 @@ Usage:
   nusuk schedule --target HH:MM:SS     Schedule a request at target time
        [--path /api/path]
        [--count 5]
+  nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
+  nusuk captcha-show                  Show stored captcha token
 
 Options:
   --target HH:MM:SS   Target server arrival time
@@ -176,6 +210,8 @@ Options:
 
 Environment:
   AUTH_PATH           Path to auth.json (default: ./auth.json)
+  CAPTCHA_PATH        Path to captcha.json (default: ./captcha.json)
+  CAPTCHA_TOKEN       Captcha token value for captcha-set
 `);
 }
 
@@ -191,6 +227,12 @@ async function main() {
       break;
     case "schedule":
       await cmdSchedule(args);
+      break;
+    case "captcha-set":
+      await cmdCaptchaSet();
+      break;
+    case "captcha-show":
+      await cmdCaptchaShow();
       break;
     case "help":
     case "--help":
