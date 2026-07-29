@@ -28,7 +28,26 @@ function parseTarget(str) {
   return target;
 }
 
+function findCreds() {
+  const candidates = [
+    process.env.CREDS_PATH,
+    "creds.json",
+    resolve(process.cwd(), "creds.json"),
+  ];
+  for (const p of candidates) {
+    if (p && existsSync(p)) return p;
+  }
+  return null;
+}
+
 function findAuth() {
+  const creds = findCreds();
+  if (creds) {
+    try {
+      const data = JSON.parse(readFileSync(creds, "utf8"));
+      if (data?.response?.data?.authInfo?.userToken) return creds;
+    } catch {}
+  }
   const candidates = [
     process.env.AUTH_PATH,
     "auth.json",
@@ -41,6 +60,13 @@ function findAuth() {
 }
 
 function findCaptcha() {
+  const creds = findCreds();
+  if (creds) {
+    try {
+      const data = JSON.parse(readFileSync(creds, "utf8"));
+      if (data?.captchaToken) return creds;
+    } catch {}
+  }
   const candidates = [
     process.env.CAPTCHA_PATH,
     "captcha.json",
@@ -57,6 +83,21 @@ function readCaptchaToken() {
   if (!p) return null;
   try { return JSON.parse(readFileSync(p, "utf8")).captchaToken || null; }
   catch { return null; }
+}
+
+function writeCaptchaToken(token) {
+  const creds = findCreds();
+  if (creds) {
+    const existing = JSON.parse(readFileSync(creds, "utf8"));
+    existing.captchaToken = token;
+    writeFileSync(creds, JSON.stringify(existing, null, 2) + "\n");
+  }
+  const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
+  const existing = existsSync(captchaPath)
+    ? JSON.parse(readFileSync(captchaPath, "utf8"))
+    : {};
+  existing.captchaToken = token;
+  writeFileSync(captchaPath, JSON.stringify(existing, null, 2) + "\n");
 }
 
 async function cmdBench(args) {
@@ -148,19 +189,15 @@ async function cmdReq(args) {
 }
 
 async function cmdCaptchaSet() {
-  const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
-  const existing = existsSync(captchaPath)
-    ? JSON.parse(readFileSync(captchaPath, "utf8"))
-    : {};
-  existing.captchaToken = process.env.CAPTCHA_TOKEN || "";
-  writeFileSync(captchaPath, JSON.stringify(existing, null, 2) + "\n");
-  console.log(`captchaToken ${existing.captchaToken ? "updated" : "cleared"} in ${captchaPath}`);
+  const token = process.env.CAPTCHA_TOKEN || "";
+  writeCaptchaToken(token);
+  console.log(`captchaToken ${token ? "updated" : "cleared"} in captcha files`);
 }
 
 async function cmdCaptchaShow() {
   const captchaPath = findCaptcha();
   if (!captchaPath) {
-    console.log("captcha.json not found");
+    console.log("captcha file not found (tried creds.json, captcha.json)");
     return;
   }
   const data = JSON.parse(readFileSync(captchaPath, "utf8"));
@@ -348,6 +385,7 @@ Options:
   --count N           Number of calibration samples (default: 5)
 
 Environment:
+  CREDS_PATH            Path to shared creds.json (default: ./creds.json)
   AUTH_PATH             Path to auth.json (default: ./auth.json)
   CAPTCHA_PATH          Path to captcha.json (default: ./captcha.json)
   CAPTCHA_TOKEN         Captcha token value for captcha-set

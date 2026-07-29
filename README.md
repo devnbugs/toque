@@ -53,19 +53,36 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 
 | File | Purpose | Git |
 |---|---|---|
-| `auth.json` | Auth tokens (`response.data.authInfo.userToken`) | ignored |
+| `creds.json` | Merged creds file (auth + captcha together) | ignored |
+| `auth.json` | Auth tokens (`response.data.authInfo.userToken`) — fallback if not in `creds.json` | ignored |
 | `entity.json` | Entity headers (`activeEntityId`, `activeEntityTypeId`) | tracked |
-| `captcha.json` | Captcha token (`captchaToken`) | ignored |
+| `captcha.json` | Captcha token (`captchaToken`) — fallback if not in `creds.json` | ignored |
+
+`creds.json` combines both auth and captcha in one file:
+
+```json
+{
+  "captchaToken": "...",
+  "response": {
+    "data": {
+      "authInfo": {
+        "userToken": "..."
+      }
+    }
+  }
+}
+```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `AUTH_PATH` | `auth.json` | Path to auth file |
+| `CREDS_PATH` | `creds.json` | Path to shared creds file (checked first) |
+| `AUTH_PATH` | `auth.json` | Path to auth file (fallback) |
 | `ENTITY_CONFIG_PATH` | `entity.json` | Path to entity config file |
 | `ACTIVE_ENTITY_ID` | — | Overrides entity ID (takes priority over file) |
 | `ACTIVE_ENTITY_TYPE_ID` | — | Overrides entity type ID |
-| `CAPTCHA_PATH` | `captcha.json` | Path to captcha file |
+| `CAPTCHA_PATH` | `captcha.json` | Path to captcha file (fallback) |
 | `CAPTCHA_TOKEN` | — | Captcha token value for `captcha-set` |
 
 ## Programmatic API
@@ -74,9 +91,9 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 import { Nusuk } from "./src/nusuk.js";
 
 const nusuk = new Nusuk()
-  .loadAuth("auth.json")       // sets Authorization header
+  .loadAuth("auth.json")       // sets Authorization header (falls back to creds.json)
   .loadEntity()                 // reads entity.json for entity headers
-  .loadCaptcha("captcha.json"); // stores captchaToken (optional)
+  .loadCaptcha("captcha.json"); // stores captchaToken (falls back to creds.json)
 
 await nusuk.init();
 
@@ -121,6 +138,7 @@ Weighted one-way: `(min_ttfb × 0.6 + avg_ttfb × 0.4) ÷ 2`
 ├── src/nusuk.js        # Nusuk class (programmatic API)
 ├── senReq.js           # Original entry point
 ├── reqTook.js          # Standalone benchmark/scheduler
+├── creds.json          # Shared auth + captcha credentials (gitignored)
 ├── entity.json         # Entity configuration
 ├── package.json
 └── .gitignore

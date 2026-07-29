@@ -18,21 +18,45 @@ export class Nusuk {
   }
 
   loadAuth(path) {
-    const raw = readFileSync(path, "utf8");
-    const parsed = JSON.parse(raw);
+    const credsPath = process.env.CREDS_PATH || "creds.json";
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      parsed = null;
+    }
+    if (!parsed?.response?.data?.authInfo?.userToken) {
+      try {
+        parsed = JSON.parse(readFileSync(credsPath, "utf8"));
+      } catch {
+        throw new Error("auth file missing response.data.authInfo.userToken");
+      }
+    }
     const authInfo = parsed?.response?.data?.authInfo;
     if (!authInfo?.userToken) {
-      throw new Error("auth.json missing response.data.authInfo.userToken");
+      throw new Error("auth file missing response.data.authInfo.userToken");
     }
     this.defaultHeaders["Authorization"] = `Bearer ${authInfo.userToken}`;
     return this;
   }
 
   loadCaptcha(path) {
-    const raw = readFileSync(path, "utf8");
-    const parsed = JSON.parse(raw);
+    const credsPath = process.env.CREDS_PATH || "creds.json";
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      parsed = null;
+    }
     if (!parsed?.captchaToken) {
-      throw new Error("captcha.json missing captchaToken");
+      try {
+        parsed = JSON.parse(readFileSync(credsPath, "utf8"));
+      } catch {
+        throw new Error("captcha file missing captchaToken");
+      }
+    }
+    if (!parsed?.captchaToken) {
+      throw new Error("captcha file missing captchaToken");
     }
     this.captchaToken = parsed.captchaToken;
     return this;
