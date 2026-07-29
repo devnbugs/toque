@@ -9,17 +9,20 @@ function ms(ms) {
 }
 
 function formatTime(date) {
-  return date.toTimeString().slice(0, 8);
+  return date.toTimeString().slice(0, 8) + "." + String(date.getMilliseconds()).padStart(3, "0");
 }
 
 function parseTarget(str) {
   const parts = str.split(":");
   if (parts.length !== 3) return null;
-  const [h, m, s] = parts.map(Number);
+  const secParts = parts[2].split(".");
+  const s = Number(secParts[0]);
+  const ms = Number(secParts[1]) || 0;
+  const [h, m] = parts.map(Number);
   if ([h, m, s].some(isNaN)) return null;
   const now = new Date();
   const target = new Date(now);
-  target.setHours(h, m, s, 0);
+  target.setHours(h, m, s, ms);
   if (target <= now) target.setDate(target.getDate() + 1);
   return target;
 }
@@ -204,7 +207,7 @@ Usage:
   nusuk captcha-show                  Show stored captcha token
 
 Options:
-  --target HH:MM:SS   Target server arrival time
+  --target HH:MM:SS   Target server arrival time (with optional .mmm ms)
   --path /api/path    API endpoint path (default: SendToIssueVisa)
   --count N           Number of calibration samples (default: 5)
 
