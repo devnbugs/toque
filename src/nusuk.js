@@ -39,8 +39,21 @@ export class Nusuk {
   }
 
   loadEntity(config = {}) {
-    const id = config.activeEntityId || process.env.ACTIVE_ENTITY_ID;
-    const typeId = config.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID;
+    let id = config.activeEntityId;
+    let typeId = config.activeEntityTypeId;
+
+    if (!id && !typeId) {
+      const filePath = config.path || process.env.ENTITY_CONFIG_PATH || "entity.json";
+      try {
+        const file = JSON.parse(readFileSync(filePath, "utf8"));
+        id = id || file.activeEntityId;
+        typeId = typeId || file.activeEntityTypeId;
+      } catch {}
+    }
+
+    id = id || process.env.ACTIVE_ENTITY_ID;
+    typeId = typeId || process.env.ACTIVE_ENTITY_TYPE_ID;
+
     if (id) this.defaultHeaders["activeentityid"] = String(id);
     if (typeId) this.defaultHeaders["activeentitytypeid"] = String(typeId);
     return this;

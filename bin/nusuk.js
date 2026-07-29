@@ -348,9 +348,12 @@ Options:
   --count N           Number of calibration samples (default: 5)
 
 Environment:
-  AUTH_PATH           Path to auth.json (default: ./auth.json)
-  CAPTCHA_PATH        Path to captcha.json (default: ./captcha.json)
-  CAPTCHA_TOKEN       Captcha token value for captcha-set
+  AUTH_PATH             Path to auth.json (default: ./auth.json)
+  CAPTCHA_PATH          Path to captcha.json (default: ./captcha.json)
+  CAPTCHA_TOKEN         Captcha token value for captcha-set
+  ENTITY_CONFIG_PATH    Path to entity.json (default: ./entity.json)
+  ACTIVE_ENTITY_ID      Override entity id (takes priority over config file)
+  ACTIVE_ENTITY_TYPE_ID Override entity type id (takes priority over config file)
 `);
 }
 
