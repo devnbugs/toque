@@ -154,6 +154,29 @@ async function cmdCaptchaShow() {
   console.log(data.captchaToken || "(empty)");
 }
 
+function stddev(arr) {
+  if (arr.length < 2) return 0;
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  return Math.round(Math.sqrt(arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length));
+}
+
+function connectionQuality(stddev) {
+  if (stddev <= 5) return { label: "stable", icon: "\u2714" };
+  if (stddev <= 15) return { label: "moderate", icon: "\u26a0" };
+  return { label: "jittery", icon: "\u274c" };
+}
+
+async function calibrate(nusuk, count, label) {
+  console.log(`  ${label}`);
+  const samples = [];
+  for (let i = 0; i < count; i++) {
+    const res = await nusuk.request("/manifest.json");
+    samples.push(res.timing);
+    console.log(`    req ${i + 1}: total=${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}  status=${res.status}`);
+  }
+  return samples;
+}
+
 async function cmdSchedule(args) {
   const targetIdx = args.indexOf("--target");
   const targetStr = targetIdx !== -1 ? args[targetIdx + 1] : null;
@@ -186,37 +209,73 @@ async function cmdSchedule(args) {
   await nusuk.init();
 
   try {
-    console.log(`\nSending ${count} calibration requests...\n`);
-    const samples = [];
-    for (let i = 0; i < count; i++) {
-      const res = await nusuk.request("/manifest.json");
-      samples.push(res.timing);
-      console.log(`  req ${i + 1}: total=${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}  status=${res.status}`);
-    }
+    // Phase 1: warm-up (establish connection, dismiss outliers)
+    const warmup = await calibrate(nusuk, 2, "Warm-up");
+
+    // Phase 2: full calibration
+    const samples = await calibrate(nusuk, count, "Calibration");
 
     const totals = samples.map((s) => s.total);
     const ttfbVals = samples.map((s) => s.ttfb).filter(Boolean);
     const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
 
-    const realTtfb = ttfbVals.filter((v) => v > 2);
-    const minTtfb = realTtfb.length ? Math.min(...realTtfb) : (ttfbVals.length ? Math.min(...ttfbVals) : null);
-    const netOneWay = minTtfb ? Math.round(minTtfb / 2) : Math.round(Math.min(...totals) / 4);
-    const safety = 50;
-    const sendAhead = netOneWay + safety;
+    // Use calibration data, fall back to warm-up if all cached (<2ms)
+    let pool = [...samples.map((s) => s.ttfb).filter((v) => v > 2)];
+    if (pool.length === 0) {
+      pool = [...warmup.map((s) => s.ttfb).filter((v) => v > 2)];
+    }
+    const minTtfb = pool.length ? Math.min(...pool) : (ttfbVals.length ? Math.min(...ttfbVals) : null);
+    const avgRealTtfb = pool.length ? avg(pool) : minTtfb;
+    const sdTtfb = pool.length ? stddev(pool) : 0;
+
+    // Weighted one-way: bias toward min but include avg for jitter
+    const netOneWay = minTtfb ? Math.round((minTtfb * 0.6 + avgRealTtfb * 0.4) / 2) : Math.round(Math.min(...totals) / 4);
+    const jitterBuffer = Math.min(sdTtfb + 20, 120);
+    const sendAhead = netOneWay + jitterBuffer;
     const sendAt = new Date(target.getTime() - sendAhead);
 
-    console.log(`\n--- Calibration Result ---`);
+    const quality = connectionQuality(sdTtfb);
+    const driftRange = sdTtfb > 0 ? `\u00b1${sdTtfb}ms` : "\u22645ms";
+
+    console.log(`\n--- Connection Quality ---`);
+    console.log(`  stability    : ${quality.icon} ${quality.label}  (stddev ${ms(sdTtfb)}, drift ~${driftRange})`);
     console.log(`  min ttfb     : ${ms(minTtfb)}`);
-    console.log(`  net 1-way    : ${ms(netOneWay)}  (min ttfb ÷ 2 — network delivery time)`);
-    console.log(`  safety margin: ${ms(safety)}`);
+    console.log(`  avg ttfb     : ${ms(avgRealTtfb)}`);
+    console.log(`  weighted 1-way: ${ms(netOneWay)}  (min\xd70.6 + avg\xd70.4 \xf7 2)`);
+    console.log(`  jitter buffer : ${ms(jitterBuffer)}`);
     console.log(`\n--- Schedule ---`);
     console.log(`  deliver to server: ${formatTime(target)}`);
     console.log(`  send at          : ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
 
-    const wait = sendAt.getTime() - Date.now();
-    if (wait > 0) {
-      console.log(`  waiting ${ms(wait)}...`);
-      await new Promise((r) => setTimeout(r, wait));
+    const waitMs = sendAt.getTime() - Date.now();
+    if (waitMs > 0) {
+      console.log(`  waiting ${ms(waitMs)}...`);
+
+      // Phase 3: mid-calibration refresh at 60% of wait time
+      if (waitMs > 5000) {
+        const midWait = Math.round(waitMs * 0.6);
+        await new Promise((r) => setTimeout(r, midWait));
+        const refresh = await calibrate(nusuk, 2, "Mid-calibration refresh");
+
+        const refreshTtfb = refresh.map((s) => s.ttfb).filter((v) => v > 2).filter(Boolean);
+        if (refreshTtfb.length) {
+          const refreshMin = Math.min(...refreshTtfb);
+          const refreshAvg = avg(refreshTtfb);
+          const refreshOneWay = Math.round((refreshMin * 0.6 + refreshAvg * 0.4) / 2);
+          const adjustedAhead = refreshOneWay + jitterBuffer;
+          const adjustedSend = new Date(target.getTime() - adjustedAhead);
+          if (adjustedSend.getTime() < sendAt.getTime() + 200 && adjustedSend.getTime() > Date.now()) {
+            console.log(`\n  \u21aa refresh 1-way: ${ms(refreshOneWay)}  -> adjusting send time`);
+            sendAt.setTime(adjustedSend.getTime());
+          } else {
+            console.log(`\n  \u21aa refresh 1-way: ${ms(refreshOneWay)}  (keep original schedule)`);
+          }
+        }
+      }
+
+      const remaining = sendAt.getTime() - Date.now();
+      if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
+
       const sendActual = Date.now();
       const res = await nusuk.request(path, { method, payload });
       const responseReceived = Date.now();
