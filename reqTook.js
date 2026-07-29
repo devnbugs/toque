@@ -5,17 +5,21 @@ function ms(ms) {
 }
 
 function formatTime(date) {
-  return date.toTimeString().slice(0, 8);
+  return date.toTimeString().slice(0, 8) + "." + String(date.getMilliseconds()).padStart(3, "0");
 }
 
 function parseTarget(str) {
-  const parts = str.split(":");
-  if (parts.length !== 3) return null;
-  const [h, m, s] = parts.map(Number);
+  let parts = str.split(":");
+  if (parts.length < 3 || parts.length > 4) return null;
+  const ms = parts.length === 4 ? Number(parts[3]) : 0;
+  const secParts = parts[2].split(".");
+  const s = Number(secParts[0]);
+  const msFromSec = Number(secParts[1]) || 0;
+  const [h, m] = parts.map(Number);
   if ([h, m, s].some(isNaN)) return null;
   const now = new Date();
   const target = new Date(now);
-  target.setHours(h, m, s, 0);
+  target.setHours(h, m, s, ms || msFromSec);
   if (target <= now) target.setDate(target.getDate() + 1);
   return target;
 }
@@ -32,21 +36,30 @@ async function benchmark(nusuk, count = 5) {
 
   const totals = samples.map((s) => s.total);
   const ttfbVals = samples.map((s) => s.ttfb).filter(Boolean);
-  const avg = (arr) => Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
-  const stats = {
-    total: { min: Math.min(...totals), avg: avg(totals), max: Math.max(...totals) },
-    ttfb: ttfbVals.length ? { min: Math.min(...ttfbVals), avg: avg(ttfbVals), max: Math.max(...ttfbVals) } : null,
-  };
+  const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
+  const min = (arr) => Math.min(...arr);
+
+  const realTtfb = ttfbVals.filter((v) => v > 2);
+  const minTtfb = realTtfb.length ? min(realTtfb) : (ttfbVals.length ? min(ttfbVals) : null);
+  const avgTtfb = ttfbVals.length ? avg(ttfbVals) : null;
+  const netOneWay = minTtfb ? Math.round(minTtfb / 2) : null;
 
   console.log(`\n--- Latency Stats ---`);
-  console.log(`  total RTT : min=${ms(stats.total.min)}  avg=${ms(stats.total.avg)}  max=${ms(stats.total.max)}`);
-  if (stats.ttfb) {
-    console.log(`  ttfb      : min=${ms(stats.ttfb.min)}  avg=${ms(stats.ttfb.avg)}  max=${ms(stats.ttfb.max)}`);
+  console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(Math.max(...totals))}`);
+  if (ttfbVals.length) {
+    const filtered = realTtfb.length < ttfbVals.length ? ` (${realTtfb.length}/${ttfbVals.length} real)` : "";
+    console.log(`  ttfb       : min=${ms(minTtfb)}  avg=${ms(avgTtfb)}  max=${ms(Math.max(...ttfbVals))}${filtered}`);
+    if (realTtfb.length) {
+      console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
+    }
   }
-  const oneway = stats.ttfb ? stats.ttfb.avg : Math.round(stats.total.avg / 2);
-  console.log(`  one-way ~ : ${ms(oneway)}`);
+  if (netOneWay) {
+    console.log(`  net 1-way  : ${ms(netOneWay)}  (min ttfb ÷ 2)  <-- request delivery`);
+  }
+  const oneway = netOneWay || Math.round(avg(totals) / 2);
+  console.log(`  one-way ~  : ${ms(oneway)}`);
 
-  return { stats, oneway };
+  return { stats, oneway, netOneWay };
 }
 
 async function main() {
@@ -65,36 +78,43 @@ async function main() {
   await nusuk.init();
 
   try {
-    const { stats, oneway } = await benchmark(nusuk, count);
+    const { stats, oneway, netOneWay } = await benchmark(nusuk, count);
 
     if (targetStr) {
       const target = parseTarget(targetStr);
-      const safety = 200;
-      const sendAhead = oneway + safety;
+      const safety = 50;
+      const sendAhead = (netOneWay || oneway) + safety;
       const sendAt = new Date(target.getTime() - sendAhead);
 
       console.log(`\n--- Schedule ---`);
-      console.log(`  target arrival : ${formatTime(target)}`);
-      console.log(`  send request at: ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
+      console.log(`  deliver to server: ${formatTime(target)}`);
+      console.log(`  send at          : ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
 
       const wait = sendAt.getTime() - Date.now();
       if (wait > 0) {
         console.log(`  waiting ${ms(wait)}...`);
         await new Promise((r) => setTimeout(r, wait));
+        const sendActual = Date.now();
         const res = await nusuk.request("/umrah/groups_apis/api/Groups/SendToIssueVisa", {
           method: "POST",
           payload: null,
         });
-        const arrived = new Date();
-        const drift = arrived.getTime() - target.getTime();
-        console.log(`\n  request sent`);
-        console.log(`  arrived at     : ${formatTime(arrived)}.${String(arrived.getMilliseconds()).padStart(3, "0")}`);
-        console.log(`  server time    : ${formatTime(target)}`);
-        console.log(`  drift          : ${drift >= 0 ? "+" : ""}${drift}ms`);
-        console.log(`  response status: ${res.status}`);
-        if (res.json) console.log(`  response body  :`, JSON.stringify(res.json, null, 2).slice(0, 500));
+        const responseReceived = Date.now();
+        const serverArrival = sendActual + (netOneWay || oneway);
+        const drift = serverArrival - target.getTime();
+        console.log(`\n--- Result ---`);
+        console.log(`  sent at          : ${formatTime(new Date(sendActual))}`);
+        console.log(`  ~server arrival  : ${formatTime(new Date(serverArrival))}`);
+        console.log(`  target           : ${formatTime(target)}`);
+        console.log(`  drift            : ${drift >= 0 ? "+" : ""}${drift}ms`);
+        console.log(`  response received: ${formatTime(new Date(responseReceived))}`);
+        console.log(`  response status  : ${res.status}`);
+        if (res.timing) {
+          console.log(`  actual ttfb      : ${ms(res.timing.total)}`);
+        }
+        if (res.json) console.log(`  response:`, JSON.stringify(res.json, null, 2).slice(0, 600));
       } else {
-        console.log(`  target ${formatTime(target)} is in the past (or too close). Use a future time.`);
+        console.log(`  target ${formatTime(target)} is too close or in the past.`);
       }
     }
   } finally {

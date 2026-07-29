@@ -13,16 +13,17 @@ function formatTime(date) {
 }
 
 function parseTarget(str) {
-  const parts = str.split(":");
-  if (parts.length !== 3) return null;
+  let parts = str.split(":");
+  if (parts.length < 3 || parts.length > 4) return null;
+  const ms = parts.length === 4 ? Number(parts[3]) : 0;
   const secParts = parts[2].split(".");
   const s = Number(secParts[0]);
-  const ms = Number(secParts[1]) || 0;
+  const msFromSec = Number(secParts[1]) || 0;
   const [h, m] = parts.map(Number);
   if ([h, m, s].some(isNaN)) return null;
   const now = new Date();
   const target = new Date(now);
-  target.setHours(h, m, s, ms);
+  target.setHours(h, m, s, ms || msFromSec);
   if (target <= now) target.setDate(target.getDate() + 1);
   return target;
 }
@@ -69,15 +70,28 @@ async function cmdBench(args) {
 
     const totals = samples.map((s) => s.total);
     const ttfbVals = samples.map((s) => s.ttfb).filter(Boolean);
-    const avg = (arr) => Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+    const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
+    const min = (arr) => Math.min(...arr);
+
+    const realTtfb = ttfbVals.filter((v) => v > 2);
+    const minTtfb = realTtfb.length ? min(realTtfb) : (ttfbVals.length ? min(ttfbVals) : null);
+    const avgTtfb = ttfbVals.length ? avg(ttfbVals) : null;
+    const netOneWay = minTtfb ? Math.round(minTtfb / 2) : null;
 
     console.log(`\n--- Latency Stats ---`);
-    console.log(`  total RTT : min=${ms(Math.min(...totals))}  avg=${ms(avg(totals))}  max=${ms(Math.max(...totals))}`);
+    console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(Math.max(...totals))}`);
     if (ttfbVals.length) {
-      console.log(`  ttfb      : min=${ms(Math.min(...ttfbVals))}  avg=${ms(avg(ttfbVals))}  max=${ms(Math.max(...ttfbVals))}`);
+      const filtered = realTtfb.length < ttfbVals.length ? ` (${realTtfb.length}/${ttfbVals.length} real)` : "";
+      console.log(`  ttfb       : min=${ms(minTtfb)}  avg=${ms(avgTtfb)}  max=${ms(Math.max(...ttfbVals))}${filtered}`);
+      if (realTtfb.length) {
+        console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
+      }
     }
-    const oneway = ttfbVals.length ? avg(ttfbVals) : Math.round(avg(totals) / 2);
-    console.log(`  one-way ~ : ${ms(oneway)}`);
+    if (netOneWay) {
+      console.log(`  net 1-way  : ${ms(netOneWay)}  (min ttfb ÷ 2)  <-- request delivery`);
+    }
+    const oneway = netOneWay || Math.round(avg(totals) / 2);
+    console.log(`  one-way ~  : ${ms(oneway)}`);
   } finally {
     await nusuk.close();
   }
@@ -134,6 +148,8 @@ async function cmdSchedule(args) {
   const targetStr = targetIdx !== -1 ? args[targetIdx + 1] : null;
   const pathIdx = args.indexOf("--path");
   const path = pathIdx !== -1 ? args[pathIdx + 1] : "/umrah/groups_apis/api/Groups/SendToIssueVisa";
+  const methodIdx = args.indexOf("--method");
+  const method = methodIdx !== -1 ? args[methodIdx + 1].toUpperCase() : "POST";
   const countIdx = args.indexOf("--count");
   const count = countIdx !== -1 ? parseInt(args[countIdx + 1], 10) || 5 : 5;
 
@@ -143,7 +159,7 @@ async function cmdSchedule(args) {
   }
   const target = parseTarget(targetStr);
   if (!target) {
-    console.error("Invalid target time. Use HH:MM:SS format.");
+    console.error("Invalid target time. Use HH:MM:SS[.mmm] or HH:MM:SS:mmm");
     process.exit(1);
   }
 
@@ -162,28 +178,43 @@ async function cmdSchedule(args) {
 
     const totals = samples.map((s) => s.total);
     const ttfbVals = samples.map((s) => s.ttfb).filter(Boolean);
-    const avg = (arr) => Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
-    const oneway = ttfbVals.length ? avg(ttfbVals) : Math.round(avg(totals) / 2);
-    const safety = 200;
-    const sendAhead = oneway + safety;
+    const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
+
+    const realTtfb = ttfbVals.filter((v) => v > 2);
+    const minTtfb = realTtfb.length ? Math.min(...realTtfb) : (ttfbVals.length ? Math.min(...ttfbVals) : null);
+    const netOneWay = minTtfb ? Math.round(minTtfb / 2) : Math.round(Math.min(...totals) / 4);
+    const safety = 50;
+    const sendAhead = netOneWay + safety;
     const sendAt = new Date(target.getTime() - sendAhead);
 
+    console.log(`\n--- Calibration Result ---`);
+    console.log(`  min ttfb     : ${ms(minTtfb)}`);
+    console.log(`  net 1-way    : ${ms(netOneWay)}  (min ttfb ÷ 2 — network delivery time)`);
+    console.log(`  safety margin: ${ms(safety)}`);
     console.log(`\n--- Schedule ---`);
-    console.log(`  target arrival : ${formatTime(target)}`);
-    console.log(`  send request at: ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
+    console.log(`  deliver to server: ${formatTime(target)}`);
+    console.log(`  send at          : ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
 
     const wait = sendAt.getTime() - Date.now();
     if (wait > 0) {
       console.log(`  waiting ${ms(wait)}...`);
       await new Promise((r) => setTimeout(r, wait));
-      const res = await nusuk.request(path, { method: "POST" });
-      const arrived = new Date();
-      const drift = arrived.getTime() - target.getTime();
-      console.log(`\n  request sent`);
-      console.log(`  arrived at     : ${formatTime(arrived)}.${String(arrived.getMilliseconds()).padStart(3, "0")}`);
-      console.log(`  server time    : ${formatTime(target)}`);
-      console.log(`  drift          : ${drift >= 0 ? "+" : ""}${drift}ms`);
-      console.log(`  response status: ${res.status}`);
+      const sendActual = Date.now();
+      const res = await nusuk.request(path, { method });
+      const responseReceived = Date.now();
+      const serverArrival = sendActual + netOneWay;
+      const drift = serverArrival - target.getTime();
+
+      console.log(`\n--- Result ---`);
+      console.log(`  sent at          : ${formatTime(new Date(sendActual))}`);
+      console.log(`  ~server arrival  : ${formatTime(new Date(serverArrival))}`);
+      console.log(`  target           : ${formatTime(target)}`);
+      console.log(`  drift            : ${drift >= 0 ? "+" : ""}${drift}ms`);
+      console.log(`  response received: ${formatTime(new Date(responseReceived))}`);
+      console.log(`  response status  : ${res.status}`);
+      if (res.timing) {
+        console.log(`  actual ttfb      : ${ms(res.timing.total)}`);
+      }
       if (res.json) console.log(`  response:`, JSON.stringify(res.json, null, 2).slice(0, 600));
     } else {
       console.log(`  target ${formatTime(target)} is too close or in the past.`);
@@ -200,15 +231,17 @@ nusuk — Nusuk request handler CLI
 Usage:
   nusuk bench [count]                  Run latency benchmark
   nusuk request <path> [method]        Send a request
-  nusuk schedule --target HH:MM:SS     Schedule a request at target time
+  nusuk schedule --target HH:MM:SS     Schedule request to arrive at server at target time
        [--path /api/path]
+       [--method GET]
        [--count 5]
   nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
   nusuk captcha-show                  Show stored captcha token
 
 Options:
-  --target HH:MM:SS   Target server arrival time (with optional .mmm ms)
+  --target HH:MM:SS   Server delivery target time (HH:MM:SS.mmm or HH:MM:SS:mmm)
   --path /api/path    API endpoint path (default: SendToIssueVisa)
+  --method GET|POST   HTTP method (default: POST)
   --count N           Number of calibration samples (default: 5)
 
 Environment:
