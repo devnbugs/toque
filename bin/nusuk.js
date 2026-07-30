@@ -54,7 +54,12 @@ function findAuth() {
     resolve(process.cwd(), "auth.json"),
   ];
   for (const p of candidates) {
-    if (p && existsSync(p)) return p;
+    if (p && existsSync(p)) {
+      try {
+        const data = JSON.parse(readFileSync(p, "utf8"));
+        if (data?.response?.data?.authInfo?.userToken) return p;
+      } catch {}
+    }
   }
   return null;
 }
@@ -73,7 +78,12 @@ function findCaptcha() {
     resolve(process.cwd(), "captcha.json"),
   ];
   for (const p of candidates) {
-    if (p && existsSync(p)) return p;
+    if (p && existsSync(p)) {
+      try {
+        const data = JSON.parse(readFileSync(p, "utf8"));
+        if (data?.captchaToken) return p;
+      } catch {}
+    }
   }
   return null;
 }
