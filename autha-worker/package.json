@@ -1,0 +1,14 @@
+{
+  "name": "autha-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Autha Cloudflare Worker KV REST API",
+  "scripts": {
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "test": "node test.js"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  }
+}
