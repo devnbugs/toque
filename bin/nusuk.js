@@ -120,31 +120,18 @@ function readEntityId() {
   }
 }
 
-async function cmdPull(args) {
-  const getArg = (flag) => {
-    const i = args.indexOf(flag);
-    return i !== -1 ? args[i + 1] : undefined;
-  };
-  const entityId =
-    getArg("--entity") || process.env.ACTIVE_ENTITY_ID || readEntityId();
-  const type = getArg("--type") || "visa";
-  const endpoint = getArg("--endpoint");
-
-  if (!entityId) {
-    console.error("Entity ID required. Use --entity <id> or set activeEntityId in entity.json");
-    process.exit(1);
-  }
+async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = {}) {
+  entityId = entityId || process.env.ACTIVE_ENTITY_ID || readEntityId();
 
   const worker = new AuthaWorker({ endpoint, entityId });
-  console.log(`Pulling from ${worker.endpoint} (entity ${entityId}, captcha type ${type})...\n`);
+  if (!quiet) {
+    console.log(`Pulling from ${worker.endpoint} (entity ${entityId}, captcha type ${type})...\n`);
+  }
 
   const [token, captcha] = await Promise.all([
     worker.fetchLatestAuthToken(entityId),
     worker.fetchLatestCaptcha(entityId, type),
   ]);
-
-  if (!token) console.error("  Warning: no auth token found in worker records");
-  if (!captcha) console.error(`  Warning: no ${type} captcha found in worker`);
 
   const authPath = process.env.AUTH_PATH || "auth.json";
   const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
@@ -179,8 +166,31 @@ async function cmdPull(args) {
     }
     if (captcha) data.captchaToken = captcha;
     writeFileSync(creds, JSON.stringify(data, null, 2) + "\n");
-    console.log(`  merged into ${creds}`);
+    if (!quiet) console.log(`  merged into ${creds}`);
   }
+
+  return { token, captcha, authPath, captchaPath };
+}
+
+async function cmdPull(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const entityId =
+    getArg("--entity") || process.env.ACTIVE_ENTITY_ID || readEntityId();
+  const type = getArg("--type") || "visa";
+  const endpoint = getArg("--endpoint");
+
+  if (!entityId) {
+    console.error("Entity ID required. Use --entity <id> or set activeEntityId in entity.json");
+    process.exit(1);
+  }
+
+  const { token, captcha, authPath, captchaPath } = await pullCreds({ entityId, type, endpoint });
+
+  if (!token) console.error("  Warning: no auth token found in worker records");
+  if (!captcha) console.error(`  Warning: no ${type} captcha found in worker`);
 
   console.log(`\n  auth    -> ${authPath}${token ? "" : " (skipped — none found)"}`);
   console.log(`  captcha -> ${captchaPath}${captcha ? "" : " (skipped — none found)"}`);
@@ -188,6 +198,22 @@ async function cmdPull(args) {
   if (captcha) console.log(`  captcha : ${captcha.slice(0, 28)}...`);
 
   if (!token && !captcha) process.exitCode = 1;
+}
+
+async function autoPull() {
+  try {
+    const result = await pullCreds({ type: "visa", quiet: true });
+    if (result.token || result.captcha) {
+      const files = [result.token && result.authPath, result.captcha && result.captchaPath]
+        .filter(Boolean)
+        .join(" and ");
+      console.log(`  auto-created ${files} from worker`);
+    }
+    return result;
+  } catch (e) {
+    console.error(`  auto-pull from worker failed: ${e.message}`);
+    return {};
+  }
 }
 
 async function cmdBench(args) {
@@ -260,7 +286,15 @@ async function cmdReq(args) {
     else payload = { ...(payload || {}), captchaToken: token };
   }
 
-  const authPath = findAuth();
+  let authPath = findAuth();
+  if (!authPath || (useCaptcha && !payload?.captchaToken)) {
+    const pulled = await autoPull();
+    authPath = authPath || (pulled.token ? pulled.authPath : null);
+    if (useCaptcha && !payload?.captchaToken && pulled.captcha) {
+      payload = { ...(payload || {}), captchaToken: pulled.captcha };
+    }
+  }
+
   const nusuk = authPath ? new Nusuk().loadAuth(authPath).loadEntity() : new Nusuk().loadEntity();
   await nusuk.init();
 
@@ -352,6 +386,13 @@ async function cmdSchedule(args) {
   }
 
   const authPath = findAuth();
+  if (!authPath || (useCaptcha && !payload?.captchaToken)) {
+    const pulled = await autoPull();
+    authPath = authPath || (pulled.token ? pulled.authPath : null);
+    if (useCaptcha && !payload?.captchaToken && pulled.captcha) {
+      payload = { ...(payload || {}), captchaToken: pulled.captcha };
+    }
+  }
   const nusuk = authPath ? new Nusuk().loadAuth(authPath).loadEntity() : new Nusuk().loadEntity();
   await nusuk.init();
 
@@ -468,6 +509,9 @@ Usage:
   nusuk pull [--entity <id>]          Pull latest auth token + captcha from the
        [--type login|visa|general]      autha-worker KV into auth.json/captcha.json
        [--endpoint <url>]
+
+  request/schedule auto-create auth.json + captcha.json from the worker
+  when they are missing.
 
 Options:
   --target HH:MM:SS   Server delivery target time (HH:MM:SS.mmm or HH:MM:SS:mmm)
