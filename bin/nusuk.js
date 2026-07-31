@@ -125,7 +125,7 @@ async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = 
 
   const worker = new AuthaWorker({ endpoint, entityId });
   if (!quiet) {
-    console.log(`Pulling from ${worker.endpoint} (entity ${entityId}, captcha type ${type})...\n`);
+    console.log(`Pulling from ${worker.endpoint} (entity ${entityId}, system user ${worker.systemUserId}, captcha type ${type})...\n`);
   }
 
   const [token, captcha] = await Promise.all([

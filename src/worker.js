@@ -23,20 +23,27 @@ export class AuthaWorker {
       DEFAULT_ENDPOINT
     ).replace(/\/+$/, "");
     this.entityId =
-      config.entityId || process.env.ACTIVE_ENTITY_ID || this._readEntityFile() || null;
+      config.entityId || process.env.ACTIVE_ENTITY_ID || this._readEntityFile()?.activeEntityId || null;
+    this.systemUserId =
+      config.systemUserId ||
+      process.env.SYSTEM_USER_ID ||
+      this._readEntityFile()?.systemUserId ||
+      "default";
   }
 
   _readEntityFile() {
     const filePath = process.env.ENTITY_CONFIG_PATH || "entity.json";
     try {
-      return JSON.parse(readFileSync(filePath, "utf8")).activeEntityId || null;
+      return JSON.parse(readFileSync(filePath, "utf8"));
     } catch {
       return null;
     }
   }
 
   async _get(path) {
-    const resp = await fetch(`${this.endpoint}${path}`, {
+    const sep = path.includes("?") ? "&" : "?";
+    const url = `${this.endpoint}${path}${sep}systemUserId=${encodeURIComponent(this.systemUserId)}`;
+    const resp = await fetch(url, {
       headers: { Accept: "application/json" },
     });
     let json = null;
@@ -60,6 +67,14 @@ export class AuthaWorker {
   async fetchLatestAuthToken(entityId) {
     const eid = entityId || this.entityId;
     if (!eid) throw new Error("Entity ID required (pass entityId or --entity)");
+
+    try {
+      const json = await this._get(`/entity/${eid}/token/latest`);
+      const token = this._extractToken(json.latestAuthToken);
+      if (token) return token;
+    } catch {
+      // fall back to the record scan below
+    }
 
     const list = await this._get(
       `/records?prefix=${encodeURIComponent(`entity_${eid}_`)}&limit=200`
