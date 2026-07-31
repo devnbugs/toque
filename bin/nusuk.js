@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import { Nusuk } from "../src/nusuk.js";
+import { AuthaWorker } from "../src/worker.js";
 
 function ms(ms) {
   return `${ms}ms`;
@@ -108,6 +109,85 @@ function writeCaptchaToken(token) {
     : {};
   existing.captchaToken = token;
   writeFileSync(captchaPath, JSON.stringify(existing, null, 2) + "\n");
+}
+
+function readEntityId() {
+  const filePath = process.env.ENTITY_CONFIG_PATH || "entity.json";
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8")).activeEntityId || null;
+  } catch {
+    return null;
+  }
+}
+
+async function cmdPull(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const entityId =
+    getArg("--entity") || process.env.ACTIVE_ENTITY_ID || readEntityId();
+  const type = getArg("--type") || "visa";
+  const endpoint = getArg("--endpoint");
+
+  if (!entityId) {
+    console.error("Entity ID required. Use --entity <id> or set activeEntityId in entity.json");
+    process.exit(1);
+  }
+
+  const worker = new AuthaWorker({ endpoint, entityId });
+  console.log(`Pulling from ${worker.endpoint} (entity ${entityId}, captcha type ${type})...\n`);
+
+  const [token, captcha] = await Promise.all([
+    worker.fetchLatestAuthToken(entityId),
+    worker.fetchLatestCaptcha(entityId, type),
+  ]);
+
+  if (!token) console.error("  Warning: no auth token found in worker records");
+  if (!captcha) console.error(`  Warning: no ${type} captcha found in worker`);
+
+  const authPath = process.env.AUTH_PATH || "auth.json";
+  const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
+
+  if (token) {
+    writeFileSync(
+      authPath,
+      JSON.stringify(
+        { response: { data: { authInfo: { userToken: token } } } },
+        null,
+        2
+      ) + "\n"
+    );
+  }
+  if (captcha) {
+    writeFileSync(
+      captchaPath,
+      JSON.stringify({ captchaToken: captcha }, null, 2) + "\n"
+    );
+  }
+
+  const creds = findCreds();
+  if (creds && (token || captcha)) {
+    const data = JSON.parse(readFileSync(creds, "utf8"));
+    if (token) {
+      data.response = data.response || {};
+      data.response.data = data.response.data || {};
+      data.response.data.authInfo = {
+        ...(data.response.data.authInfo || {}),
+        userToken: token,
+      };
+    }
+    if (captcha) data.captchaToken = captcha;
+    writeFileSync(creds, JSON.stringify(data, null, 2) + "\n");
+    console.log(`  merged into ${creds}`);
+  }
+
+  console.log(`\n  auth    -> ${authPath}${token ? "" : " (skipped — none found)"}`);
+  console.log(`  captcha -> ${captchaPath}${captcha ? "" : " (skipped — none found)"}`);
+  if (token) console.log(`  token   : ${token.slice(0, 28)}...`);
+  if (captcha) console.log(`  captcha : ${captcha.slice(0, 28)}...`);
+
+  if (!token && !captcha) process.exitCode = 1;
 }
 
 async function cmdBench(args) {
@@ -385,6 +465,9 @@ Usage:
        [--count 5]
   nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
   nusuk captcha-show                  Show stored captcha token
+  nusuk pull [--entity <id>]          Pull latest auth token + captcha from the
+       [--type login|visa|general]      autha-worker KV into auth.json/captcha.json
+       [--endpoint <url>]
 
 Options:
   --target HH:MM:SS   Server delivery target time (HH:MM:SS.mmm or HH:MM:SS:mmm)
@@ -402,6 +485,7 @@ Environment:
   ENTITY_CONFIG_PATH    Path to entity.json (default: ./entity.json)
   ACTIVE_ENTITY_ID      Override entity id (takes priority over config file)
   ACTIVE_ENTITY_TYPE_ID Override entity type id (takes priority over config file)
+  WORKER_URL            autha-worker endpoint for "pull" (default: https://autha-worker.decloud.workers.dev)
 `);
 }
 
@@ -423,6 +507,9 @@ async function main() {
       break;
     case "captcha-show":
       await cmdCaptchaShow();
+      break;
+    case "pull":
+      await cmdPull(args);
       break;
     case "help":
     case "--help":
