@@ -2,8 +2,9 @@ name = "autha-worker"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
 
-# KV namespace binding — created via `npx wrangler kv namespace create AUTHA_KV`
-# The ID below is a placeholder; it will be replaced after creation.
+[vars]
+AUTHA_CAPTCHA_TTL_SECONDS = "120"
+
 [[kv_namespaces]]
 binding = "AUTHA_KV"
 id = "f852295d4aac43a29b7a43ebbf29ca90"

@@ -49,6 +49,7 @@ const ALLOWED_HEADERS = [
   'X-Autha-Tab-Id',
   'X-Autha-Url',
   'X-Profile-Tag',
+  'X-Autha-System-User-Id',
   'activeentityid',
   'entity-id',
 ].join(', ');
@@ -281,6 +282,24 @@ function getSigningSecret(env) {
   return env.AUTHA_SIGNING_SECRET || DEFAULT_SIGNING_SECRET;
 }
 
+function sanitizeSystemUserId(value) {
+  const v = String(value || '').trim();
+  if (!v) return 'default';
+  return v.replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+function snippetKeyPrefix(systemUserId) {
+  const uid = sanitizeSystemUserId(systemUserId);
+  return uid === 'default' ? '' : `u_${uid}_`;
+}
+
+function matchesSystemUser(metadata, systemUserId) {
+  const uid = sanitizeSystemUserId(systemUserId);
+  const recUid = metadata && metadata.systemUserId;
+  if (!recUid) return uid === 'default';
+  return recUid === uid;
+}
+
 async function handleDeleteAll(env) {
   const allKeys = [];
   let cursor = undefined;
@@ -334,6 +353,8 @@ async function handlePost(request, env) {
   const entityId = extractEntityId(rawRecord, request);
   rawRecord.entityId = entityId;
   rawRecord.activeEntityId = entityId;
+  const systemUserId = sanitizeSystemUserId(request.headers.get('X-Autha-System-User-Id'));
+  rawRecord.systemUserId = systemUserId;
 
   // Sanitize bulk information before saving
   const cleanRecord = sanitizeRecord(rawRecord);
@@ -381,23 +402,24 @@ async function handlePost(request, env) {
     };
 
     const snippetStr = JSON.stringify(captchaSnippet, null, 2);
+    const sp = snippetKeyPrefix(systemUserId);
 
     // Latest for specific captcha type (login vs issue_visa)
     if (captchaType === 'LOGIN') {
-      await env.AUTHA_KV.put(`latest_captcha_login_${entityId}`, snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
+      await env.AUTHA_KV.put(`latest_captcha_login_${sp}${entityId}`, snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
     } else if (captchaType === 'SEND_ISSUE_VISA') {
-      await env.AUTHA_KV.put(`latest_captcha_visa_${entityId}`, snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
+      await env.AUTHA_KV.put(`latest_captcha_visa_${sp}${entityId}`, snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
     }
 
     // Latest captcha for entity overall
-    await env.AUTHA_KV.put(`latest_captcha_${entityId}`, snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
+    await env.AUTHA_KV.put(`latest_captcha_${sp}${entityId}`, snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
     // Global latest captcha
-    await env.AUTHA_KV.put('latest_captcha_global', snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
+    await env.AUTHA_KV.put(`latest_captcha_global_${sp}`, snippetStr, { expirationTtl: 30 * 24 * 60 * 60 });
   }
 
   // Update latest record snippet for entityId
   await env.AUTHA_KV.put(
-    `latest_entity_${entityId}`,
+    `latest_entity_${snippetKeyPrefix(systemUserId)}${entityId}`,
     JSON.stringify(
       {
         entityId,
@@ -408,6 +430,7 @@ async function handlePost(request, env) {
         url: cleanRecord.url || null,
         isCaptcha,
         captchaType,
+        systemUserId,
       },
       null,
       2
@@ -429,6 +452,7 @@ async function handlePost(request, env) {
       ok: true,
       key,
       entityId,
+      systemUserId,
       action: cleanRecord.action,
       source: cleanRecord.source,
       timestamp: cleanRecord.timestamp,
@@ -442,6 +466,7 @@ async function handlePost(request, env) {
     {
       'X-Autha-Record-Key': key,
       'X-Autha-Entity-Id': entityId,
+      'X-Autha-System-User-Id': systemUserId,
     }
   );
 }
@@ -451,6 +476,7 @@ async function handleGetRecords(request, env) {
   const prefix = searchParams.get('prefix') || '';
   const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 1000);
   const cursor = searchParams.get('cursor') || undefined;
+  const systemUserId = sanitizeSystemUserId(searchParams.get('systemUserId'));
 
   const list = await env.AUTHA_KV.list({
     prefix: prefix || undefined,
@@ -459,12 +485,13 @@ async function handleGetRecords(request, env) {
   });
 
   const keys = list.keys.filter(
-    (k) => !k.name.startsWith('__') && !k.name.startsWith('latest_')
+    (k) => !k.name.startsWith('__') && !k.name.startsWith('latest_') && matchesSystemUser(k.metadata, systemUserId)
   );
 
   return jsonResponse(
     {
       ok: true,
+      systemUserId,
       records: keys.map((k) => ({
         key: k.name,
         metadata: k.metadata || {},
@@ -529,7 +556,7 @@ async function handleDeleteRecord(key, env) {
 
 // ─── Entity & Captcha Categorization Query Handlers ─────────────────────────────
 
-async function handleListEntities(env) {
+async function handleListEntities(env, systemUserId) {
   const statsRaw = await env.AUTHA_KV.get('__stats__');
   const stats = statsRaw ? JSON.parse(statsRaw) : {};
   let entities = stats.entities || [];
@@ -546,6 +573,7 @@ async function handleListEntities(env) {
 
   return jsonResponse({
     ok: true,
+    systemUserId: sanitizeSystemUserId(systemUserId),
     entities,
     count: entities.length,
   });
@@ -556,6 +584,7 @@ async function handleGetEntityRecords(entityId, request, env) {
   const actionFilter = searchParams.get('action') || searchParams.get('type') || null;
   const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 1000);
   const cursor = searchParams.get('cursor') || undefined;
+  const systemUserId = sanitizeSystemUserId(searchParams.get('systemUserId'));
 
   const prefix = `entity_${entityId}_`;
   const list = await env.AUTHA_KV.list({ prefix, limit, cursor });
@@ -568,10 +597,12 @@ async function handleGetEntityRecords(entityId, request, env) {
              (k.metadata?.captchaType || '').toUpperCase().includes(filterUpper)
     );
   }
+  keys = keys.filter((k) => matchesSystemUser(k.metadata, systemUserId));
 
   return jsonResponse({
     ok: true,
     entityId,
+    systemUserId,
     actionFilter: actionFilter || null,
     records: keys.map((k) => ({
       key: k.name,
@@ -582,8 +613,9 @@ async function handleGetEntityRecords(entityId, request, env) {
   });
 }
 
-async function handleGetEntityLatest(entityId, env) {
-  const latestSnippet = await env.AUTHA_KV.get(`latest_entity_${entityId}`);
+async function handleGetEntityLatest(entityId, env, systemUserId) {
+  const sp = snippetKeyPrefix(systemUserId);
+  const latestSnippet = await env.AUTHA_KV.get(`latest_entity_${sp}${entityId}`);
   if (latestSnippet) {
     try {
       const snippet = JSON.parse(latestSnippet);
@@ -591,6 +623,7 @@ async function handleGetEntityLatest(entityId, env) {
       return jsonResponse({
         ok: true,
         entityId,
+        systemUserId: sanitizeSystemUserId(systemUserId),
         snippet,
         record: fullRecord ? JSON.parse(fullRecord) : null,
       });
@@ -602,30 +635,38 @@ async function handleGetEntityLatest(entityId, env) {
     return jsonResponse({ ok: false, error: `No records found for entityId ${entityId}` }, 404);
   }
 
-  const latestKey = list.keys[list.keys.length - 1].name;
+  const scoped = list.keys.filter((k) => matchesSystemUser(k.metadata, systemUserId));
+  if (!scoped.length) {
+    return jsonResponse({ ok: false, error: `No records found for entityId ${entityId}` }, 404);
+  }
+
+  const latestKey = scoped[scoped.length - 1].name;
   const recordVal = await env.AUTHA_KV.get(latestKey);
   return jsonResponse({
     ok: true,
     entityId,
+    systemUserId: sanitizeSystemUserId(systemUserId),
     key: latestKey,
     record: recordVal ? JSON.parse(recordVal) : null,
   });
 }
 
-async function handleGetEntityCaptcha(entityId, subType, env) {
-  let keyName = `latest_captcha_${entityId}`;
-  if (subType === 'login') keyName = `latest_captcha_login_${entityId}`;
-  if (subType === 'visa' || subType === 'sendcaptcha') keyName = `latest_captcha_visa_${entityId}`;
+async function handleGetEntityCaptcha(entityId, subType, env, systemUserId) {
+  const sp = snippetKeyPrefix(systemUserId);
+  let keyName = `latest_captcha_${sp}${entityId}`;
+  if (subType === 'login') keyName = `latest_captcha_login_${sp}${entityId}`;
+  if (subType === 'visa' || subType === 'sendcaptcha') keyName = `latest_captcha_visa_${sp}${entityId}`;
 
   const captchaVal = await env.AUTHA_KV.get(keyName);
   if (!captchaVal) {
     // Fallback to searching latest general captcha for entityId
     if (subType) {
-      const fallbackVal = await env.AUTHA_KV.get(`latest_captcha_${entityId}`);
+      const fallbackVal = await env.AUTHA_KV.get(`latest_captcha_${sp}${entityId}`);
       if (fallbackVal) {
         return jsonResponse({
           ok: true,
           entityId,
+          systemUserId: sanitizeSystemUserId(systemUserId),
           subTypeRequested: subType,
           fallbackGeneralCaptcha: JSON.parse(fallbackVal),
         });
@@ -637,20 +678,23 @@ async function handleGetEntityCaptcha(entityId, subType, env) {
   return jsonResponse({
     ok: true,
     entityId,
+    systemUserId: sanitizeSystemUserId(systemUserId),
     captchaType: subType ? subType.toUpperCase() : 'LATEST',
     latestCaptcha: JSON.parse(captchaVal),
   });
 }
 
-async function handleGetEntityCaptchas(entityId, env) {
+async function handleGetEntityCaptchas(entityId, env, systemUserId) {
+  const sp = snippetKeyPrefix(systemUserId);
   const list = await env.AUTHA_KV.list({ prefix: `entity_${entityId}_` });
   const captchaKeys = list.keys.filter(
-    (k) => k.metadata?.isCaptcha || k.name.includes('_CAPTCHA_')
+    (k) => (k.metadata?.isCaptcha || k.name.includes('_CAPTCHA_')) && matchesSystemUser(k.metadata, systemUserId)
   );
 
   return jsonResponse({
     ok: true,
     entityId,
+    systemUserId: sanitizeSystemUserId(systemUserId),
     captchas: captchaKeys.map((k) => ({
       key: k.name,
       metadata: k.metadata || {},
@@ -659,14 +703,16 @@ async function handleGetEntityCaptchas(entityId, env) {
   });
 }
 
-async function handleGetAllCaptchas(env) {
+async function handleGetAllCaptchas(env, systemUserId) {
+  const sp = snippetKeyPrefix(systemUserId);
   const list = await env.AUTHA_KV.list({ limit: 100 });
   const captchas = list.keys.filter(
-    (k) => k.metadata?.isCaptcha || k.name.includes('_CAPTCHA_')
+    (k) => (k.metadata?.isCaptcha || k.name.includes('_CAPTCHA_')) && matchesSystemUser(k.metadata, systemUserId)
   );
 
   return jsonResponse({
     ok: true,
+    systemUserId: sanitizeSystemUserId(systemUserId),
     captchas: captchas.map((k) => ({
       key: k.name,
       metadata: k.metadata || {},
@@ -675,13 +721,15 @@ async function handleGetAllCaptchas(env) {
   });
 }
 
-async function handleGetGlobalLatestCaptcha(env) {
-  const captchaVal = await env.AUTHA_KV.get('latest_captcha_global');
+async function handleGetGlobalLatestCaptcha(env, systemUserId) {
+  const sp = snippetKeyPrefix(systemUserId);
+  const captchaVal = await env.AUTHA_KV.get(`latest_captcha_global_${sp}`);
   if (!captchaVal) {
     return jsonResponse({ ok: false, error: 'No global captcha tokens captured yet' }, 404);
   }
   return jsonResponse({
     ok: true,
+    systemUserId: sanitizeSystemUserId(systemUserId),
     latestCaptcha: JSON.parse(captchaVal),
   });
 }
@@ -702,6 +750,44 @@ async function handleHealth() {
       'entity-categorization',
       'rest-api',
     ],
+  });
+}
+
+async function handleConfig(request, env) {
+  const { searchParams } = parseUrl(request.url);
+  const systemUserId = sanitizeSystemUserId(searchParams.get('systemUserId'));
+
+  const statsRaw = await env.AUTHA_KV.get('__stats__');
+  const stats = statsRaw ? JSON.parse(statsRaw) : { totalRecords: 0, entities: [], lastUpdated: 0 };
+
+  const latestEntityKey = `latest_entity_${snippetKeyPrefix(systemUserId)}`;
+  const latestEntity = await env.AUTHA_KV.get(latestEntityKey);
+
+  const latestCaptchaKey = `latest_captcha_${snippetKeyPrefix(systemUserId)}`;
+  const latestCaptcha = await env.AUTHA_KV.get(latestCaptchaKey);
+
+  const latestAuthKey = `latest_auth_token_${snippetKeyPrefix(systemUserId)}`;
+  const latestAuth = await env.AUTHA_KV.get(latestAuthKey);
+
+  const latestGlobalCaptcha = await env.AUTHA_KV.get(`latest_captcha_global_${snippetKeyPrefix(systemUserId)}`);
+
+  return jsonResponse({
+    ok: true,
+    systemUserId,
+    config: {
+      workerKvEndpoint: 'https://autha-worker.decloud.workers.dev/',
+      signingSecret: getSigningSecret(env),
+      captchaTtlSeconds: Math.max(30, Number(env.AUTHA_CAPTCHA_TTL_SECONDS) || 120),
+    },
+    entity: latestEntity ? JSON.parse(latestEntity) : null,
+    latestCaptcha: latestCaptcha ? JSON.parse(latestCaptcha) : null,
+    latestAuthToken: latestAuth ? JSON.parse(latestAuth) : null,
+    globalLatestCaptcha: latestGlobalCaptcha ? JSON.parse(latestGlobalCaptcha) : null,
+    stats: {
+      totalRecords: stats.totalRecords || 0,
+      entities: stats.entities || [],
+      lastUpdated: stats.lastUpdated || 0,
+    },
   });
 }
 
@@ -744,8 +830,9 @@ export default {
     };
 
     try {
-      const { parts } = parseUrl(request.url);
+      const { parts, searchParams } = parseUrl(request.url);
       const method = request.method.toUpperCase();
+      const systemUserId = sanitizeSystemUserId(searchParams.get('systemUserId'));
 
       let response;
 
@@ -753,45 +840,49 @@ export default {
       if (method === 'POST' && parts.length === 0) {
         response = await handlePost(request, env);
       }
-      // GET /health
-      else if (method === 'GET' && parts[0] === 'health') {
-        response = await handleHealth();
-      }
-      // GET /stats
+       // GET /health
+       else if (method === 'GET' && parts[0] === 'health') {
+         response = await handleHealth();
+       }
+       // GET /api/config — Show current working config, entity, and rest
+       else if (method === 'GET' && parts[0] === 'api' && parts[1] === 'config' && parts.length === 2) {
+         response = await handleConfig(request, env);
+       }
+       // GET /stats
       else if (method === 'GET' && parts[0] === 'stats') {
         response = await handleStats(env);
       }
       // GET /entities — List all distinct Entity IDs
       else if (method === 'GET' && parts[0] === 'entities' && parts.length === 1) {
-        response = await handleListEntities(env);
+        response = await handleListEntities(env, systemUserId);
       }
       // GET /captchas/latest — Get latest captured captcha globally
       else if (method === 'GET' && parts[0] === 'captchas' && parts[1] === 'latest') {
-        response = await handleGetGlobalLatestCaptcha(env);
+        response = await handleGetGlobalLatestCaptcha(env, systemUserId);
       }
       // GET /captchas — List all captured captchas
       else if (method === 'GET' && parts[0] === 'captchas' && parts.length === 1) {
-        response = await handleGetAllCaptchas(env);
+        response = await handleGetAllCaptchas(env, systemUserId);
       }
       // GET /entity/:entityId/captcha/login — Get latest LOGIN captcha
       else if (method === 'GET' && parts[0] === 'entity' && parts.length === 4 && parts[2] === 'captcha' && parts[3] === 'login') {
-        response = await handleGetEntityCaptcha(parts[1], 'login', env);
+        response = await handleGetEntityCaptcha(parts[1], 'login', env, systemUserId);
       }
       // GET /entity/:entityId/captcha/visa — Get latest SEND_ISSUE_VISA captcha (sendCaptcha)
       else if (method === 'GET' && parts[0] === 'entity' && parts.length === 4 && parts[2] === 'captcha' && (parts[3] === 'visa' || parts[3] === 'sendcaptcha')) {
-        response = await handleGetEntityCaptcha(parts[1], 'visa', env);
+        response = await handleGetEntityCaptcha(parts[1], 'visa', env, systemUserId);
       }
       // GET /entity/:entityId/captcha — Get latest general captcha for entityId
       else if (method === 'GET' && parts[0] === 'entity' && parts.length === 3 && parts[2] === 'captcha') {
-        response = await handleGetEntityCaptcha(parts[1], null, env);
+        response = await handleGetEntityCaptcha(parts[1], null, env, systemUserId);
       }
       // GET /entity/:entityId/captchas — List all captchas for entityId
       else if (method === 'GET' && parts[0] === 'entity' && parts.length === 3 && parts[2] === 'captchas') {
-        response = await handleGetEntityCaptchas(parts[1], env);
+        response = await handleGetEntityCaptchas(parts[1], env, systemUserId);
       }
       // GET /entity/:entityId/latest — Get latest record for entityId
       else if (method === 'GET' && parts[0] === 'entity' && parts.length === 3 && parts[2] === 'latest') {
-        response = await handleGetEntityLatest(parts[1], env);
+        response = await handleGetEntityLatest(parts[1], env, systemUserId);
       }
       // GET /entity/:entityId — List records for entityId
       else if (method === 'GET' && parts[0] === 'entity' && parts.length === 2) {
