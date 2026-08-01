@@ -5,3 +5,5 @@ creds.json
 .env
 .env.*
 !.env.example
+.ipynb_checkpoints/
+autha-worker/
