@@ -134,30 +134,40 @@ export class AuthaWorker {
 
   /**
    * Pull the latest captcha token captured for an entity.
-   * type: "login" | "visa" | "general". Falls back across types.
+  * type: "login" | "visa" | "general". Falls back across types unless strict.
    */
-  async fetchLatestCaptcha(entityId, type = "visa") {
+  async fetchLatestCaptcha(entityId, type = "visa", { strict = false } = {}) {
     const eid = entityId || this.entityId;
     if (!eid) throw new Error("Entity ID required (pass entityId or --entity)");
 
     try {
       const context = await this.fetchContext(eid);
       const captcha = context.captcha || {};
-      const order = type === "login"
-        ? [captcha.login, captcha.latest, captcha.visa]
+      const preferred = type === "login"
+        ? captcha.login
         : type === "general"
-          ? [captcha.latest, captcha.visa, captcha.login]
-          : [captcha.visa, captcha.latest, captcha.login];
+          ? captcha.latest
+          : captcha.visa;
+      const order = strict
+        ? [preferred]
+        : type === "login"
+          ? [captcha.login, captcha.latest, captcha.visa]
+          : type === "general"
+            ? [captcha.latest, captcha.visa, captcha.login]
+            : [captcha.visa, captcha.latest, captcha.login];
       const found = order.find((entry) => entry?.captchaToken);
       if (found) return found.captchaToken;
     } catch {
       // Fall back to individual endpoints during staged Worker upgrades.
     }
 
-    const order =
-      type === "login"
+    const order = strict
+      ? [type]
+      : type === "login"
         ? ["login", "general", "visa"]
-        : ["visa", "login", "general"];
+        : type === "general"
+          ? ["general", "visa", "login"]
+          : ["visa", "login", "general"];
 
     for (const t of order) {
       const path =

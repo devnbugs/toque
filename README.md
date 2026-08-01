@@ -23,6 +23,7 @@ nusuk schedule --target HH:MM:SS        Schedule request for server arrival
        [--count 5]
 nusuk captcha-set                       Set captcha token (via CAPTCHA_TOKEN env)
 nusuk captcha-show                      Show stored captcha token
+nusuk captcha-solve [--v3]              Solve Nusuk reCAPTCHA via CapSolver
 nusuk pull --entity <id>                Pull auth, CAPTCHA, and entity context from D1
 nusuk login                             Ask for system user ID and install latest D1 context
 ```
@@ -42,6 +43,9 @@ nusuk schedule --target 22:00:00:500 \
 
 # Schedule with custom payload and captcha
 nusuk schedule --target 22:00:00 --data '{"key":"value"}' --captcha
+
+# Solve and store a fresh captcha
+CAPSOLVER_API_KEY=... nusuk captcha-solve
 ```
 
 ## Scripts
@@ -91,6 +95,10 @@ Git and loaded automatically by the CLI and standalone scripts.
 | `CAPTCHA_TOKEN` | — | Captcha token value for `captcha-set` |
 | `WORKER_URL` | Autha Worker URL | Worker API endpoint used by `pull` |
 | `WORKER_API_TOKEN` | — | Required bearer token for Worker reads |
+| `CAPSOLVER_API_KEY` | — | CapSolver API key for `captcha-solve` |
+| `CAPSOLVER_SITE_KEY` | Nusuk key | reCAPTCHA site key used when solving |
+| `CAPSOLVER_PAGE_URL` | Group list | Page URL used when solving |
+| `CAPSOLVER_PAGE_ACTION` | `submit` | reCAPTCHA v3 page action |
 
 ## D1 Worker integration
 
@@ -155,6 +163,7 @@ Weighted one-way: `(min_ttfb × 0.6 + avg_ttfb × 0.4) ÷ 2`
 ```
 ├── bin/nusuk.js        # CLI entry point
 ├── src/nusuk.js        # Nusuk class (programmatic API)
+├── src/capsolver.js    # CapSolver client
 ├── senReq.js           # Original entry point
 ├── reqTook.js          # Standalone benchmark/scheduler
 ├── creds.json          # Shared auth + captcha credentials (gitignored)

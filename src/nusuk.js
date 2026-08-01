@@ -35,7 +35,13 @@ export class Nusuk {
     }
     const authInfo = parsed?.response?.data?.authInfo;
     const token = requireJwt(authInfo?.userToken, "response.data.authInfo.userToken");
-    this.defaultHeaders["Authorization"] = `Bearer ${token}`;
+    this.setAuthToken(token);
+    return this;
+  }
+
+  setAuthToken(token) {
+    const validated = requireJwt(token, "auth token");
+    this.defaultHeaders["Authorization"] = `Bearer ${validated}`;
     return this;
   }
 

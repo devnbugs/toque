@@ -8,6 +8,7 @@ import { stdin as input, stdout as output } from "process";
 import { Nusuk } from "../src/nusuk.js";
 import { AuthaWorker } from "../src/worker.js";
 import { parseJwt } from "../src/jwt.js";
+import { CapSolver } from "../src/capsolver.js";
 
 function ms(ms) {
   return `${ms}ms`;
@@ -403,6 +404,21 @@ async function cmdCaptchaSet() {
 }
 
 async function cmdCaptchaShow() {
+
+  async function cmdCaptchaSolve(args) {
+    const version = args.includes("--v3") ? 3 : 2;
+    const solver = new CapSolver();
+    console.log(`Solving reCAPTCHA v${version} via CapSolver (${solver.pageUrl})...`);
+    const start = Date.now();
+    const token = await solver.solve({
+      version,
+      onStatus: (res) =>
+        console.log(`  status: ${res.status || "unknown"} (${((Date.now() - start) / 1000).toFixed(1)}s)`),
+    });
+    writeCaptchaToken(token);
+    console.log(`\n  captchaToken saved (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+    console.log(`  token: ${token.slice(0, 28)}...`);
+  }
   const captchaPath = findCaptcha();
   if (!captchaPath) {
     console.log("captcha file not found (tried creds.json, captcha.json)");
@@ -591,6 +607,7 @@ Usage:
        [--count 5]
   nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
   nusuk captcha-show                  Show stored captcha token
+  nusuk captcha-solve [--v3]          Solve Nusuk reCAPTCHA via CapSolver
   nusuk pull [--entity <id>]          Pull latest auth token + captcha from the
       [--type login|visa|general]      D1-backed worker into local credential files
        [--endpoint <url>]
@@ -620,6 +637,10 @@ Environment:
   ACTIVE_ENTITY_TYPE_ID Override entity type id (takes priority over config file)
   WORKER_URL            autha-worker endpoint for "pull" (default: https://autha-worker.decloud.workers.dev)
   WORKER_API_TOKEN      Bearer token required by the autha-worker API
+  CAPSOLVER_API_KEY     CapSolver API key for captcha-solve
+  CAPSOLVER_SITE_KEY    Override the Nusuk reCAPTCHA site key
+  CAPSOLVER_PAGE_URL    Override the Nusuk page URL
+  CAPSOLVER_PAGE_ACTION reCAPTCHA v3 action (default: submit)
 `);
 }
 
@@ -641,6 +662,9 @@ async function main() {
       break;
     case "captcha-show":
       await cmdCaptchaShow();
+      break;
+    case "captcha-solve":
+      await cmdCaptchaSolve(args);
       break;
     case "pull":
       await cmdPull(args);
