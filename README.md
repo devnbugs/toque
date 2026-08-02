@@ -77,6 +77,9 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 
 ## Environment Variables
 
+Copy `.env.example` to `.env` and fill in local values. `.env` is ignored by
+Git and loaded automatically by the CLI and standalone scripts.
+
 | Variable | Default | Description |
 |---|---|---|
 | `CREDS_PATH` | `creds.json` | Path to shared creds file (checked first) |

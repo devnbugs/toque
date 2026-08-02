@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "cloakbrowser": "^0.5.3",
+    "dotenv": "^17.2.3",
     "playwright-core": "^1.62.0"
   }
 }

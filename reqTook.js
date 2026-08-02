@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { Nusuk } from "./src/nusuk.js";
 
 function ms(ms) {

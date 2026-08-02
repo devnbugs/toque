@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import "dotenv/config";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import { createInterface } from "readline/promises";
