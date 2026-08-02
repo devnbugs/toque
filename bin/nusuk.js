@@ -2,6 +2,8 @@
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { resolve } from "path";
+import { createInterface } from "readline/promises";
+import { stdin as input, stdout as output } from "process";
 import { Nusuk } from "../src/nusuk.js";
 import { AuthaWorker } from "../src/worker.js";
 import { parseJwt } from "../src/jwt.js";
@@ -130,6 +132,11 @@ async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = 
   }
 
   const context = await worker.fetchContext(entityId, { refresh: true });
+  return saveContext(context, { type, worker, quiet });
+}
+
+function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
+  const entityId = context.entityId || context.entity?.entityId;
   const token = worker.extractToken(context.auth);
   const captchaOptions = context.captcha || {};
   const captchaOrder = type === "login"
@@ -192,6 +199,40 @@ async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = 
   }
 
   return { token, captcha, authPath, captchaPath, entityPath, context };
+}
+
+async function cmdLogin(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  let systemUserId = getArg("--system-user") || process.env.SYSTEM_USER_ID || "";
+  if (!systemUserId) {
+    const rl = createInterface({ input, output });
+    try {
+      systemUserId = (await rl.question("System user ID: ")).trim();
+    } finally {
+      rl.close();
+    }
+  }
+  if (!systemUserId) throw new Error("System user ID is required");
+
+  const worker = new AuthaWorker({
+    endpoint: getArg("--endpoint"),
+    systemUserId,
+  });
+  console.log(`Loading latest D1 context for system user ${systemUserId}...`);
+  const context = await worker.fetchUserContext(systemUserId);
+  const result = saveContext(context, {
+    type: getArg("--type") || "visa",
+    worker,
+  });
+
+  console.log(`  entity  : ${context.entityId}`);
+  console.log(`  auth    : ${result.token ? "valid JWT saved" : "not available"}`);
+  console.log(`  captcha : ${result.captcha ? "saved" : "not available"}`);
+  console.log(`  files   : ${result.authPath}, ${result.captchaPath}, ${result.entityPath}`);
+  if (!result.token) process.exitCode = 1;
 }
 
 async function cmdPull(args) {
@@ -287,8 +328,12 @@ async function cmdReq(args) {
   const dataIdx = args.indexOf("--data");
   const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
   const useCaptcha = args.includes("--captcha");
+  const rawJson = args.includes("--raw-json");
   const clean = args.filter((value, index) =>
-    value !== "--captcha" && value !== "--data" && index !== dataIdx + 1
+    value !== "--captcha" &&
+    value !== "--raw-json" &&
+    value !== "--data" &&
+    (dataIdx === -1 || index !== dataIdx + 1)
   );
   const path = clean[0];
   const method = (clean[1] || (dataStr !== null ? "POST" : "GET")).toUpperCase();
@@ -324,6 +369,20 @@ async function cmdReq(args) {
 
   try {
     const res = await nusuk.request(path, { method, payload });
+    if (rawJson) {
+      if (res.json === null) {
+        console.error(JSON.stringify({
+          error: "Response is not JSON",
+          status: res.status,
+          contentType: res.headers?.["content-type"] || null,
+          url: res.url,
+        }, null, 2));
+        process.exitCode = 2;
+        return;
+      }
+      console.log(JSON.stringify(res.json, null, 2));
+      return;
+    }
     console.log(`status: ${res.status}`);
     if (res.timing) console.log(`timing:`, res.timing);
     if (res.json) {
@@ -522,6 +581,7 @@ Usage:
   nusuk request <path> [method]        Send a request (POST defaults to {})
        [--data '{"key":"val"}']
        [--captcha]
+      [--raw-json]
   nusuk schedule --target HH:MM:SS     Schedule request to arrive at server at target time
        [--path /api/path]
        [--method GET]
@@ -533,6 +593,9 @@ Usage:
   nusuk pull [--entity <id>]          Pull latest auth token + captcha from the
       [--type login|visa|general]      D1-backed worker into local credential files
        [--endpoint <url>]
+    nusuk login [--system-user <id>]    Load latest entity, JWT, and CAPTCHA context
+      [--type login|visa|general]
+      [--endpoint <url>]
 
   request/schedule auto-create auth.json + captcha.json from the worker
   when they are missing.
@@ -543,6 +606,7 @@ Options:
   --method GET|POST   HTTP method (default: POST)
   --data <json>       JSON payload for the request body
   --captcha           Include captchaToken from captcha.json in payload
+  --raw-json          Print only a pretty-formatted JSON response
   --count N           Number of calibration samples (default: 5)
 
 Environment:
@@ -579,6 +643,9 @@ async function main() {
       break;
     case "pull":
       await cmdPull(args);
+      break;
+    case "login":
+      await cmdLogin(args);
       break;
     case "help":
     case "--help":

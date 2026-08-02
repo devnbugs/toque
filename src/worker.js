@@ -78,6 +78,12 @@ export class AuthaWorker {
     return context;
   }
 
+  async fetchUserContext(systemUserId) {
+    const uid = String(systemUserId || this.systemUserId || "").trim();
+    if (!uid) throw new Error("System user ID is required");
+    return this._get(`/api/user/${encodeURIComponent(uid)}/context`);
+  }
+
   /**
    * Pull the latest auth token (Bearer) captured for an entity.
    * Searches the newest AUTH_TOKEN / SYNC records and extracts the token.

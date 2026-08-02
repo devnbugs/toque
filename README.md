@@ -24,6 +24,7 @@ nusuk schedule --target HH:MM:SS        Schedule request for server arrival
 nusuk captcha-set                       Set captcha token (via CAPTCHA_TOKEN env)
 nusuk captcha-show                      Show stored captcha token
 nusuk pull --entity <id>                Pull auth, CAPTCHA, and entity context from D1
+nusuk login                             Ask for system user ID and install latest D1 context
 ```
 
 ### Examples
@@ -94,6 +95,11 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 `/api/entity/{entityId}/context`. The response contains the latest auth token,
 CAPTCHA variants, and automatically captured entity headers. Toque updates
 `auth.json`, `captcha.json`, and `entity.json` from that response.
+
+`nusuk login` asks for `systemUserId` when it is not supplied with
+`--system-user`. It resolves that user's latest captured entity automatically,
+validates the JWT, selects the requested CAPTCHA type, and updates all three
+local files.
 
 ## Programmatic API
 
