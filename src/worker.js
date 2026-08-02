@@ -15,6 +15,7 @@ import { readFileSync } from "fs";
 import { parseJwt } from "./jwt.js";
 
 const DEFAULT_ENDPOINT = "https://autha-worker.decloud.workers.dev";
+const CAPTCHA_TYPES = new Set(["visa", "login", "general"]);
 
 export class AuthaWorker {
   constructor(config = {}) {
@@ -165,12 +166,20 @@ export class AuthaWorker {
    * Pull the latest captcha token captured for an entity.
     * type: "login" | "visa" | "general". Falls back across types unless strict.
    */
-  async fetchLatestCaptcha(entityId, type = "visa", { strict = false } = {}) {
+  async fetchLatestCaptcha(
+    entityId,
+    type = "visa",
+    { strict = false, refresh = false } = {}
+  ) {
     const eid = entityId || this.entityId;
     if (!eid) throw new Error("Entity ID required (pass entityId or --entity)");
+    type = String(type).trim().toLowerCase();
+    if (!CAPTCHA_TYPES.has(type)) {
+      throw new Error(`Invalid CAPTCHA type: ${type}. Use visa, login, or general`);
+    }
 
     try {
-      const context = await this.fetchContext(eid);
+      const context = await this.fetchContext(eid, { refresh });
       const captcha = context.captcha || {};
       const preferred = type === "login"
         ? captcha.login

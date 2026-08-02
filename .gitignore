@@ -8,3 +8,5 @@ entity.json
 !.env.example
 .ipynb_checkpoints/
 autha-worker/
+.nusuk-captcha.pid
+nusuk-captcha.log

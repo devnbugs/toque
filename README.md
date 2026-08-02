@@ -12,23 +12,26 @@ npm install
 
 ## CLI Usage
 
+Run `nusuk` with no arguments to open a guided menu. Direct commands remain
+available for scripts and experienced users.
+
 ```
-nusuk bench [count]                     Run latency benchmark
-nusuk request <path> [method]           Send a request (POST defaults to {})
-       [--data '{"key":"val"}']
-       [--captcha]
-nusuk schedule --target HH:MM:SS        Schedule request for server arrival
-       [--path /api/path]
-       [--method GET]
-       [--data '{"key":"val"}']
-       [--captcha]
-       [--count 5]
-nusuk captcha-set                       Set captcha token (via CAPTCHA_TOKEN env)
-nusuk captcha-show                      Show stored captcha token
-nusuk captcha-solve [--v3]              Solve Nusuk reCAPTCHA via CapSolver
-nusuk pull --entity <id>                Pull auth, CAPTCHA, and entity context from D1
-nusuk login                             Ask for system user ID and install latest D1 context
+nusuk                                   Open the guided menu
+nusuk login                             Install latest user credentials
+nusuk pull                              Refresh auth, entity, and CAPTCHA
+nusuk info                              Show dashboard company information
+nusuk send <group-id>                   Send a visa request
+nusuk request <path> [method]           Send a custom API request
+nusuk api <name>                        Run a saved request from the catalog
+nusuk groups list                       Show group names and IDs
+nusuk schedule --target HH:MM:SS        Schedule a request
+nusuk bench [count]                     Run a latency benchmark
+nusuk captcha <action>                  Manage CAPTCHA
+nusuk help [command]                    Show focused help
 ```
+
+CAPTCHA actions are `pull`, `watch`, `start`, `status`, `stop`, `set`, `show`,
+and `solve`. Run `nusuk help captcha` for their options.
 
 ### Examples
 
@@ -36,8 +39,32 @@ nusuk login                             Ask for system user ID and install lates
 # Benchmark latency
 nusuk bench 5
 
+# Open the guided menu
+nusuk
+
+# Show dashboard company information
+nusuk info
+
+# Print only the complete formatted JSON response
+nusuk info --raw-json
+
 # Make an API request
 nusuk request /umrah/reports_apis/api/Dashboard/DashboardCompanyInfo POST
+
+# Verify the current subscription status (POST with an empty JSON body)
+nusuk api verify-subscription
+
+# Get group statistics for the active entity (POST with an empty JSON body)
+nusuk api groups-statistics
+
+# List the first 10 groups as names and IDs
+nusuk groups list
+
+# Print the complete GetGroupList JSON response
+nusuk api group-list --raw-json
+
+# List all saved requests
+nusuk api list
 
 # Schedule a request to arrive at exactly 22:00:00.500
 nusuk schedule --target 22:00:00:500 \
@@ -47,8 +74,52 @@ nusuk schedule --target 22:00:00:500 \
 nusuk schedule --target 22:00:00 --data '{"key":"value"}' --captcha
 
 # Solve and store a fresh captcha
-CAPSOLVER_API_KEY=... nusuk captcha-solve
+CAPSOLVER_API_KEY=... nusuk captcha solve
+
+# Silently refresh only VISA CAPTCHA every five seconds in the background
+nusuk captcha start --type visa --interval 5s --quiet
+
+# Use separate outputs when running different CAPTCHA types
+nusuk captcha start --type login --output captcha-login.json \
+  --pid-file .nusuk-captcha-login.pid --quiet
+
+# Check or stop a background puller
+nusuk captcha status
+nusuk captcha stop
 ```
+
+### Compatibility aliases
+
+Older commands remain supported: `send-visa`, `captcha-set`, `captcha-show`, and
+`captcha-solve`. New usage should prefer `send` and grouped `captcha` actions.
+Expected input errors are concise; set `NUSUK_DEBUG=1` only when a stack trace is
+needed for troubleshooting. Non-interactive executions never wait for prompts.
+
+Running `nusuk send` without a group ID in an interactive terminal fetches the
+group list and displays a numbered selector. The selected record's actual `id`
+is passed to the visa payload. Scripts should continue to provide the ID
+directly with `nusuk send <group-id>`.
+
+## Adding simple requests
+
+Named requests live in `src/requests.js`. Add one entry to `REQUESTS` and it is
+automatically available through `nusuk api list` and `nusuk api <name>`:
+
+```js
+"verify-subscription": Object.freeze({
+  name: "verify-subscription",
+  description: "Verify the current UO subscription status",
+  path: "/umrah/contracts_apis/api/UoSubscription/VerifySubscriptionStatus",
+  method: "POST",
+  payload: Object.freeze({}),
+  captcha: false,
+}),
+```
+
+Use a Nusuk path rather than an external URL. Set `captcha: true` when the
+request body requires the saved `captchaToken`. The existing authenticated
+browser session, entity headers, response formatting, and `--raw-json` behavior
+are reused automatically.
 
 ## Scripts
 
@@ -102,6 +173,9 @@ Git and loaded automatically by the CLI and standalone scripts.
 | `CAPSOLVER_SITE_KEY` | Nusuk key | reCAPTCHA site key used when solving |
 | `CAPSOLVER_PAGE_URL` | Group list | Page URL used when solving |
 | `CAPSOLVER_PAGE_ACTION` | `submit` | reCAPTCHA v3 page action |
+| `CAPTCHA_PULL_TYPE` | `visa` | Background pull type: `visa`, `login`, or `general` |
+| `CAPTCHA_PULL_INTERVAL` | `5000` | Poll interval in milliseconds, or duration such as `5s` |
+| `CAPTCHA_PULL_PID` | `.nusuk-captcha.pid` | Background puller PID metadata file |
 
 ## D1 Worker integration
 
@@ -114,6 +188,18 @@ CAPTCHA variants, and automatically captured entity headers. Toque updates
 `--system-user`. It resolves that user's latest captured entity automatically,
 validates the JWT, selects the requested CAPTCHA type, and updates all three
 local files.
+
+### Background CAPTCHA puller
+
+The CAPTCHA puller supports three distinct types: `visa`, `login`, and
+`general`. Type-specific pulls are strict by default, so a VISA pull never
+silently stores a login CAPTCHA. Add `--fallback` to permit cross-type fallback.
+
+`captcha watch` runs in the foreground for process supervisors. `captcha start`
+launches the same watcher as a detached, silent process. It pulls immediately,
+then waits for the configured interval. Repeated tokens are not rewritten, and
+transient failures retry with bounded backoff. Use a separate `--output` and
+`--pid-file` for each concurrently running CAPTCHA type.
 
 ## Programmatic API
 

@@ -5,11 +5,23 @@ import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { dirname, resolve } from "path";
 import { createInterface } from "readline/promises";
 import { stdin as input, stdout as output } from "process";
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
 import { Nusuk } from "../src/nusuk.js";
 import { AuthaWorker } from "../src/worker.js";
 import { parseJwt } from "../src/jwt.js";
 import { CapSolver } from "../src/capsolver.js";
 import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
+import {
+  isProcessRunning,
+  normalizeCaptchaType,
+  parseInterval,
+  pullCaptchaOnce,
+  readPidFile,
+  runCaptchaPullLoop,
+} from "../src/captcha-puller.js";
+import { getRequest, listRequests } from "../src/requests.js";
+import { extractGroups, formatGroups, normalizeGroupId, parseGroupSelection } from "../src/groups.js";
 
 function ms(ms) {
   return `${ms}ms`;
@@ -17,6 +29,20 @@ function ms(ms) {
 
 function formatTime(date) {
   return date.toTimeString().slice(0, 8) + "." + String(date.getMilliseconds()).padStart(3, "0");
+}
+
+function canPrompt() {
+  return Boolean(input.isTTY && output.isTTY);
+}
+
+async function ask(question) {
+  if (!canPrompt()) return null;
+  const rl = createInterface({ input, output });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
 }
 
 function findCreds() {
@@ -208,14 +234,11 @@ async function cmdLogin(args) {
   };
   let systemUserId = getArg("--system-user") || process.env.SYSTEM_USER_ID || "";
   if (!systemUserId) {
-    const rl = createInterface({ input, output });
-    try {
-      systemUserId = (await rl.question("System user ID: ")).trim();
-    } finally {
-      rl.close();
-    }
+    systemUserId = await ask("System user ID: ") || "";
   }
-  if (!systemUserId) throw new Error("System user ID is required");
+  if (!systemUserId) {
+    throw new Error("System user ID is required. Pass --system-user <id> or set SYSTEM_USER_ID");
+  }
 
   const worker = new AuthaWorker({
     endpoint: getArg("--endpoint"),
@@ -358,6 +381,28 @@ async function cmdReq(args) {
     else payload = { ...(payload || {}), captchaToken: token };
   }
 
+  const res = await executeRequest({ path, method, payload, useCaptcha });
+  if (rawJson) {
+    if (res.json === null) {
+      console.error(JSON.stringify({
+        error: "Response is not JSON",
+        status: res.status,
+        contentType: res.headers?.["content-type"] || null,
+        url: res.url,
+      }, null, 2));
+      process.exitCode = 2;
+      return;
+    }
+    console.log(JSON.stringify(res.json, null, 2));
+    return;
+  }
+  console.log(`status: ${res.status}`);
+  if (res.timing) console.log(`timing:`, res.timing);
+  if (res.json) console.log(`body:`, JSON.stringify(res.json, null, 2));
+  else console.log(`body:`, res.body);
+}
+
+async function executeRequest({ path, method = "GET", payload, useCaptcha = false }) {
   let authPath = findAuth();
   if (!authPath || (useCaptcha && !payload?.captchaToken)) {
     const pulled = await autoPull();
@@ -371,37 +416,103 @@ async function cmdReq(args) {
   await nusuk.init();
 
   try {
-    const res = await nusuk.request(path, { method, payload });
-    if (rawJson) {
-      if (res.json === null) {
-        console.error(JSON.stringify({
-          error: "Response is not JSON",
-          status: res.status,
-          contentType: res.headers?.["content-type"] || null,
-          url: res.url,
-        }, null, 2));
-        process.exitCode = 2;
-        return;
-      }
-      console.log(JSON.stringify(res.json, null, 2));
-      return;
-    }
-    console.log(`status: ${res.status}`);
-    if (res.timing) console.log(`timing:`, res.timing);
-    if (res.json) {
-      console.log(`body:`, JSON.stringify(res.json, null, 2));
-    } else {
-      console.log(`body:`, res.body);
-    }
+    return await nusuk.request(path, { method, payload });
   } finally {
     await nusuk.close();
   }
 }
 
-async function cmdCaptchaSet() {
-  const token = process.env.CAPTCHA_TOKEN || "";
+function printNamedRequests() {
+  console.log("Available requests:\n");
+  for (const request of listRequests()) {
+    console.log(`  ${request.name.padEnd(24)} ${request.method.padEnd(6)} ${request.description}`);
+  }
+  console.log("\nRun: nusuk api <name> [--raw-json]");
+}
+
+async function cmdApi(args) {
+  const [name, ...options] = args;
+  if (!name || name === "list") {
+    printNamedRequests();
+    return;
+  }
+  const request = getRequest(name);
+  if (!request) {
+    throw new Error(`Unknown request: ${name}. Run "nusuk api list" to see available requests`);
+  }
+
+  const requestArgs = [request.path, request.method];
+  if (request.payload !== undefined) {
+    requestArgs.push("--data", JSON.stringify(request.payload));
+  }
+  if (request.captcha) requestArgs.push("--captcha");
+  if (options.includes("--raw-json")) requestArgs.push("--raw-json");
+  return cmdReq(requestArgs);
+}
+
+async function fetchGroups({ limit = 10, offset = 0 } = {}) {
+  const request = getRequest("group-list");
+  const payload = { ...request.payload, limit, offset };
+  const response = await executeRequest({
+    path: request.path,
+    method: request.method,
+    payload,
+  });
+  if (response.json === null) throw new Error("Group list response is not JSON");
+  const groups = extractGroups(response.json);
+  if (groups === null) {
+    throw new Error("Unsupported group-list response shape. Run `nusuk api group-list --raw-json` to inspect it");
+  }
+  return { groups, response };
+}
+
+async function cmdGroups(args) {
+  const [action = "list", ...options] = args;
+  if (action !== "list") throw new Error("Usage: nusuk groups list [--limit 10] [--offset 0] [--raw-json]");
+  const getArg = (flag) => {
+    const index = options.indexOf(flag);
+    return index === -1 ? undefined : options[index + 1];
+  };
+  const limit = parsePositiveCount(getArg("--limit"), 10, 100);
+  const offsetText = getArg("--offset") ?? "0";
+  if (limit === null) throw new Error("Group limit must be an integer from 1 to 100");
+  if (!/^\d+$/.test(offsetText) || !Number.isSafeInteger(Number(offsetText))) {
+    throw new Error("Group offset must be a non-negative integer");
+  }
+  const { groups, response } = await fetchGroups({ limit, offset: Number(offsetText) });
+  if (options.includes("--raw-json")) {
+    console.log(JSON.stringify(response.json, null, 2));
+    return;
+  }
+  console.log(`Groups (${groups.length}):\n`);
+  console.log(formatGroups(groups));
+}
+
+async function selectGroup() {
+  if (!canPrompt()) {
+    throw new Error("Group ID is required in non-interactive mode. Run `nusuk groups list` or pass `nusuk send <group-id>`");
+  }
+  const { groups } = await fetchGroups();
+  if (!groups.length) throw new Error("No groups found for the active entity");
+  console.log(`\nSelect a group:\n\n${formatGroups(groups)}\n`);
+  const selected = parseGroupSelection(await ask(`Choose 1-${groups.length} (or 0 to cancel): `), groups);
+  if (!selected) return null;
+  console.log(`Selected: ${selected.name} (ID: ${selected.id})`);
+  return selected;
+}
+
+async function cmdCaptchaSet(args = []) {
+  const tokenIndex = args.indexOf("--token");
+  let token = args.find((arg) => !arg.startsWith("-"))
+    || (tokenIndex !== -1 ? args[tokenIndex + 1] : "")
+    || process.env.CAPTCHA_TOKEN
+    || "";
+  if (!token) token = await ask("CAPTCHA token: ") || "";
+  if (!token) {
+    throw new Error("CAPTCHA token is required. Pass a token, use --token, or set CAPTCHA_TOKEN");
+  }
   writeCaptchaToken(token);
-  console.log(`captchaToken ${token ? "updated" : "cleared"} in captcha files`);
+  console.log("CAPTCHA token updated");
 }
 
 async function cmdCaptchaShow() {
@@ -427,6 +538,143 @@ async function cmdCaptchaSolve(args) {
   writeCaptchaToken(token);
   console.log(`\n  captchaToken saved (${((Date.now() - start) / 1000).toFixed(1)}s)`);
   console.log(`  token: ${token.slice(0, 28)}...`);
+}
+
+function captchaPullOptions(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  return {
+    entityId: getArg("--entity") || process.env.ACTIVE_ENTITY_ID || readEntityId(),
+    type: normalizeCaptchaType(getArg("--type") || process.env.CAPTCHA_PULL_TYPE || "visa"),
+    endpoint: getArg("--endpoint"),
+    outputPath: getArg("--output") || process.env.CAPTCHA_PATH || "captcha.json",
+    interval: parseInterval(getArg("--interval") || process.env.CAPTCHA_PULL_INTERVAL, 5000),
+    pidPath: resolve(getArg("--pid-file") || process.env.CAPTCHA_PULL_PID || ".nusuk-captcha.pid"),
+    quiet: args.includes("--quiet"),
+    strict: !args.includes("--fallback"),
+  };
+}
+
+async function cmdCaptchaPull(args) {
+  const options = captchaPullOptions(args);
+  const result = await pullCaptchaOnce(options);
+  if (!result.token) {
+    throw new Error(`No ${options.type} CAPTCHA available for entity ${options.entityId}`);
+  }
+  if (!options.quiet) {
+    console.log(`${options.type} CAPTCHA ${result.updated ? "saved" : "unchanged"} -> ${result.outputPath}`);
+  }
+}
+
+async function cmdCaptchaWatch(args) {
+  const options = captchaPullOptions(args);
+  if (!options.entityId) throw new Error("Entity ID required (pass --entity or configure entity.json)");
+
+  const existing = readPidFile(options.pidPath);
+  if (existing && existing.pid !== process.pid && isProcessRunning(existing.pid)) {
+    throw new Error(`CAPTCHA puller already running (PID ${existing.pid})`);
+  }
+  writePrivateJson(options.pidPath, {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    entityId: String(options.entityId),
+    type: options.type,
+    outputPath: resolve(options.outputPath),
+  });
+
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    if (!options.quiet) {
+      console.log(`Watching ${options.type} CAPTCHA for entity ${options.entityId} every ${options.interval}ms`);
+    }
+    await runCaptchaPullLoop({ ...options, signal: controller.signal });
+  } finally {
+    const owned = readPidFile(options.pidPath);
+    if (owned?.pid === process.pid) {
+      try { unlinkSync(options.pidPath); } catch {}
+    }
+  }
+}
+
+async function cmdCaptchaStart(args) {
+  const options = captchaPullOptions(args);
+  if (!options.entityId) throw new Error("Entity ID required (pass --entity or configure entity.json)");
+  const existing = readPidFile(options.pidPath);
+  if (existing && isProcessRunning(existing.pid)) {
+    throw new Error(`CAPTCHA puller already running (PID ${existing.pid})`);
+  }
+  if (existing) {
+    try { unlinkSync(options.pidPath); } catch {}
+  }
+
+  const childArgs = [
+    fileURLToPath(import.meta.url), "captcha", "watch",
+    "--type", options.type,
+    "--entity", String(options.entityId),
+    "--output", options.outputPath,
+    "--interval", String(options.interval),
+    "--pid-file", options.pidPath,
+    "--quiet",
+  ];
+  const endpointIndex = args.indexOf("--endpoint");
+  if (endpointIndex !== -1 && args[endpointIndex + 1]) {
+    childArgs.push("--endpoint", args[endpointIndex + 1]);
+  }
+  if (args.includes("--fallback")) childArgs.push("--fallback");
+
+  const child = spawn(process.execPath, childArgs, {
+    cwd: process.cwd(),
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
+  child.unref();
+  if (!options.quiet) console.log(`CAPTCHA puller started (PID ${child.pid}, type ${options.type})`);
+}
+
+async function cmdCaptchaStatus(args) {
+  const options = captchaPullOptions(args);
+  const state = readPidFile(options.pidPath);
+  if (!state || !isProcessRunning(state.pid)) {
+    if (state) try { unlinkSync(options.pidPath); } catch {}
+    console.log("CAPTCHA puller is not running");
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`CAPTCHA puller running (PID ${state.pid}, type ${state.type}, entity ${state.entityId})`);
+}
+
+async function cmdCaptchaStop(args) {
+  const options = captchaPullOptions(args);
+  const state = readPidFile(options.pidPath);
+  if (!state || !isProcessRunning(state.pid)) {
+    if (state) try { unlinkSync(options.pidPath); } catch {}
+    console.log("CAPTCHA puller is not running");
+    return;
+  }
+  process.kill(state.pid, "SIGTERM");
+  console.log(`Stopping CAPTCHA puller (PID ${state.pid})`);
+}
+
+async function cmdCaptcha(args) {
+  const [action = "help", ...rest] = args;
+  switch (action) {
+    case "pull": return cmdCaptchaPull(rest);
+    case "watch": return cmdCaptchaWatch(rest);
+    case "start": return cmdCaptchaStart(rest);
+    case "status": return cmdCaptchaStatus(rest);
+    case "stop": return cmdCaptchaStop(rest);
+    case "set": return cmdCaptchaSet(rest);
+    case "show": return cmdCaptchaShow();
+    case "solve": return cmdCaptchaSolve(rest);
+    case "help": help("captcha"); return;
+    default: throw new Error("Usage: nusuk captcha <pull|watch|start|status|stop|set|show|solve>");
+  }
 }
 
 function stddev(arr) {
@@ -628,8 +876,12 @@ async function cmdSendVisa(args) {
   const endpoint = getArg("--endpoint");
 
   if (!groupId) {
-    console.error("Usage: nusuk send-visa <groupid> [--target HH:MM:SS] [--no-test]");
-    process.exit(1);
+    const selected = await selectGroup();
+    if (!selected) {
+      console.log("Cancelled.");
+      return;
+    }
+    groupId = selected.id;
   }
   if (targetStr && !target) {
     console.error("Invalid target time. Use HH:MM:SS[.mmm] or HH:MM:SS:mmm");
@@ -721,9 +973,8 @@ async function cmdSendVisa(args) {
       await new Promise((r) => setTimeout(r, secondWait));
     }
 
-    const numericId = Number(groupId);
     const payload = {
-      id: Number.isNaN(numericId) ? groupId : numericId,
+      id: normalizeGroupId(groupId),
       captchaToken: readCaptchaToken() || captcha,
     };
     const sendActual = Date.now();
@@ -741,69 +992,120 @@ async function cmdSendVisa(args) {
     await nusuk.close();
   }
 }
-function help() {
-  console.log(`
-nusuk — Nusuk request handler CLI
+function help(topic = "") {
+  if (topic === "captcha") {
+    console.log(`
+Usage: nusuk captcha <action> [options]
 
-Usage:
-  nusuk bench [count]                  Run latency benchmark
-  nusuk request <path> [method]        Send a request (POST defaults to {})
-       [--data '{"key":"val"}']
-       [--captcha]
-      [--raw-json]
-  nusuk schedule --target HH:MM:SS     Schedule request to arrive at server at target time
-       [--path /api/path]
-       [--method GET]
-       [--data '{"key":"val"}']
-       [--captcha]
-       [--count 5]
-      nusuk send-visa <groupid>            Send a visa request, refreshing CAPTCHA
-        [--target HH:MM:SS]             20 seconds before the target time
-        [--no-test]
-        [--test-path /api/path]
-  nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
-  nusuk captcha-show                  Show stored captcha token
-  nusuk captcha-solve [--v3]          Solve Nusuk reCAPTCHA via CapSolver
-  nusuk pull [--entity <id>]          Pull latest auth token + captcha from the
-      [--type login|visa|general]      D1-backed worker into local credential files
-       [--endpoint <url>]
-    nusuk login [--system-user <id>]    Load latest entity, JWT, and CAPTCHA context
-      [--type login|visa|general]
-      [--endpoint <url>]
-
-  request/schedule auto-create auth.json + captcha.json from the worker
-  when they are missing.
+Actions:
+  pull                  Pull one CAPTCHA
+  watch                 Refresh continuously in the foreground
+  start                 Start a silent background refresher
+  status                Show background refresher status
+  stop                  Stop the background refresher
+  set [token]           Save a CAPTCHA token
+  show                  Show the saved token
+  solve [--v3]          Solve via CapSolver
 
 Options:
-  --target HH:MM:SS   Server delivery target time (HH:MM:SS.mmm or HH:MM:SS:mmm)
-  --path /api/path    API endpoint path (default: SendToIssueVisa)
-  --method GET|POST   HTTP method (default: POST)
-  --data <json>       JSON payload for the request body
-  --captcha           Include captchaToken from captcha.json in payload
-  --raw-json          Print only a pretty-formatted JSON response
-  --count N           Number of calibration samples (default: 5)
-  --no-test           Skip auth verification for send-visa
-  --test-path /api    Override the send-visa auth verification endpoint
-
-Environment:
-  CREDS_PATH            Path to shared creds.json (default: ./creds.json)
-  AUTH_PATH             Path to auth.json (default: ./auth.json)
-  CAPTCHA_PATH          Path to captcha.json (default: ./captcha.json)
-  CAPTCHA_TOKEN         Captcha token value for captcha-set
-  ENTITY_CONFIG_PATH    Path to entity.json (default: ./entity.json)
-  ACTIVE_ENTITY_ID      Override entity id (takes priority over config file)
-  ACTIVE_ENTITY_TYPE_ID Override entity type id (takes priority over config file)
-  WORKER_URL            autha-worker endpoint for "pull" (default: https://autha-worker.decloud.workers.dev)
-  WORKER_API_TOKEN      Bearer token required by the autha-worker API
-  CAPSOLVER_API_KEY     CapSolver API key for captcha-solve
-  CAPSOLVER_SITE_KEY    Override the Nusuk reCAPTCHA site key
-  CAPSOLVER_PAGE_URL    Override the Nusuk page URL
-  CAPSOLVER_PAGE_ACTION reCAPTCHA v3 action (default: submit)
+  --type <type>         visa, login, or general (default: visa)
+  --entity <id>         Entity ID
+  --interval <duration> Poll interval, for example 5s or 1m
+  --output <path>       CAPTCHA output file
+  --fallback            Allow fallback to another CAPTCHA type
+  --quiet               Suppress routine output
 `);
+    return;
+  }
+
+  console.log(`
+Toque — Nusuk command line
+
+Usage: nusuk <command> [options]
+       nusuk                    Open the guided menu
+
+Common tasks:
+  login                 Install the latest user credentials
+  pull                  Refresh auth, entity, and CAPTCHA files
+  info                  Show dashboard company information
+  send <group-id>       Send a visa request
+  request <path>        Send a custom API request
+  api <name>            Run a saved request from the catalog
+  groups list           Show group names and IDs
+  schedule              Schedule a request
+  bench [count]         Measure request latency
+
+CAPTCHA:
+  captcha <action>      Pull, monitor, set, show, or solve CAPTCHA
+
+Help:
+  help [command]        Show command help
+
+Examples:
+  nusuk login
+  nusuk info
+  nusuk send 12345
+  nusuk api verify-subscription
+  nusuk api list
+  nusuk groups list
+  nusuk captcha start --type visa --interval 5s --quiet
+  nusuk help captcha
+`);
+}
+
+async function guidedMenu() {
+  if (!canPrompt()) {
+    help();
+    return;
+  }
+  console.log(`
+What would you like to do?
+
+  1. Log in / install credentials
+  2. Refresh auth and CAPTCHA
+  3. Show company information
+  4. Send a visa request
+  5. Manage CAPTCHA
+  6. Send a custom request
+  7. Verify subscription status
+  8. Schedule a request
+  9. Benchmark latency
+  0. Exit
+`);
+  const selection = await ask("Select: ");
+  switch (selection) {
+    case "1": return cmdLogin([]);
+    case "2": return cmdPull([]);
+    case "3": return cmdApi(["company-info"]);
+    case "4": {
+      return cmdSendVisa([]);
+    }
+    case "5": help("captcha"); return;
+    case "6": {
+      const path = await ask("API path: ");
+      if (!path) throw new Error("API path is required");
+      return cmdReq([path]);
+    }
+    case "7": return cmdApi(["verify-subscription"]);
+    case "8": {
+      const target = await ask("Target time (HH:MM:SS): ");
+      if (!target) throw new Error("Target time is required");
+      return cmdSchedule(["--target", target]);
+    }
+    case "9": return cmdBench([]);
+    case "0": case "": return;
+    default: throw new Error("Invalid selection. Run `nusuk` again and choose 0-9");
+  }
 }
 
 async function main() {
   const [, , cmd, ...args] = process.argv;
+
+  if (!cmd) return guidedMenu();
+  if (args.includes("--help") || args.includes("-h")) {
+    help(cmd === "captcha" ? "captcha" : "");
+    return;
+  }
 
   switch (cmd) {
     case "bench":
@@ -812,14 +1114,21 @@ async function main() {
     case "request":
       await cmdReq(args);
       break;
+    case "api":
+      await cmdApi(args);
+      break;
+    case "groups":
+      await cmdGroups(args);
+      break;
     case "schedule":
       await cmdSchedule(args);
       break;
+    case "send":
     case "send-visa":
       await cmdSendVisa(args);
       break;
     case "captcha-set":
-      await cmdCaptchaSet();
+      await cmdCaptchaSet(args);
       break;
     case "captcha-show":
       await cmdCaptchaShow();
@@ -827,25 +1136,32 @@ async function main() {
     case "captcha-solve":
       await cmdCaptchaSolve(args);
       break;
+    case "captcha":
+      await cmdCaptcha(args);
+      break;
     case "pull":
       await cmdPull(args);
+      break;
+    case "info":
+      await cmdApi(["company-info", ...args]);
       break;
     case "login":
       await cmdLogin(args);
       break;
     case "help":
+      help(args[0] || "");
+      break;
     case "--help":
     case "-h":
       help();
       break;
     default:
-      console.error(`Unknown command: ${cmd}`);
-      help();
-      process.exit(1);
+      throw new Error(`Unknown command: ${cmd}. Run "nusuk help" for usage`);
   }
 }
 
 main().catch((err) => {
-  console.error(err);
-  process.exit(1);
+  console.error(`Error: ${err.message}`);
+  if (process.env.NUSUK_DEBUG === "1") console.error(err.stack);
+  process.exitCode = 1;
 });
