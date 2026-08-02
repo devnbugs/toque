@@ -11,8 +11,15 @@ export class Nusuk {
     this.browserOptions = config.browserOptions || { headless: true };
     this.defaultHeaders = {
       Accept: "application/json, text/plain, */*",
+      "Accept-Language": "en",
       Origin: config.origin || base.origin,
       Referer: config.referer || new URL("/umrah/reception-area/dashboard/uo", base).toString(),
+      "X-Lang": "en",
+      Priority: "u=1, i",
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-origin",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0",
       ...(config.defaultHeaders || {}),
     };
     this.browser = null;
@@ -61,6 +68,7 @@ export class Nusuk {
     if (entityId) {
       this.entityId = String(entityId);
       this.defaultHeaders["activeentityid"] = String(entityId);
+      this.defaultHeaders["entity-id"] = String(entityId);
     }
     return this;
   }
@@ -155,6 +163,27 @@ export class Nusuk {
     }
   }
 
+  async buildRequestHeaders(headers = {}) {
+    const requestHeaders = { ...this.defaultHeaders, ...headers };
+    const cookieHeader = await this._buildCookieHeader();
+    if (cookieHeader) requestHeaders.Cookie = cookieHeader;
+    if (!Object.keys(requestHeaders).some((k) => k.toLowerCase() === "content-type")) {
+      requestHeaders["Content-Type"] = "application/json";
+    }
+    return requestHeaders;
+  }
+
+  async _buildCookieHeader() {
+    if (!this.page) return null;
+    try {
+      const cookies = await this.page.context().cookies([this.baseUrl]);
+      const cookieParts = cookies.map((cookie) => `${cookie.name}=${cookie.value}`);
+      return cookieParts.length ? cookieParts.join("; ") : null;
+    } catch {
+      return null;
+    }
+  }
+
   async request(path, { method = "GET", payload = null, headers = {}, credentials = "include", mode = "cors", redirect = "follow" } = {}) {
     if (!this.page) {
       throw new Error("Nusuk not initialized. Call await nusuk.init() first.");
@@ -167,7 +196,7 @@ export class Nusuk {
     }
 
     await this._ensureOrigin();
-    const requestHeaders = { ...this.defaultHeaders, ...headers };
+    const requestHeaders = await this.buildRequestHeaders(headers);
 
     return this.page.evaluate(
       async ({ url, options }) => {

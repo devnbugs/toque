@@ -12,6 +12,9 @@ import { AuthaWorker } from "../src/worker.js";
 import { parseJwt } from "../src/jwt.js";
 import { CapSolver } from "../src/capsolver.js";
 import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
+import { computeSendSchedule } from "../src/scheduling.js";
+import { buildVisaPayload } from "../src/visa-payload.js";
+import { summarizeRequestTiming } from "../src/timing.js";
 import {
   isProcessRunning,
   normalizeCaptchaType,
@@ -29,6 +32,21 @@ function ms(ms) {
 
 function formatTime(date) {
   return date.toTimeString().slice(0, 8) + "." + String(date.getMilliseconds()).padStart(3, "0");
+}
+
+function formatCurlPreview(url, headers, payload) {
+  const lines = [];
+  lines.push(`curl --request POST --url '${url}'`);
+  for (const [key, value] of Object.entries(headers)) {
+    const safeValue = String(value).replace(/'/g, "'\\''");
+    lines.push(`  -H '${key.toLowerCase()}: ${safeValue}'`);
+  }
+  if (payload !== undefined && payload !== null) {
+    const body = typeof payload === "string" ? payload : JSON.stringify(payload);
+    const safeBody = body.replace(/'/g, "'\\''");
+    lines.push(`  --data-raw '${safeBody}'`);
+  }
+  return lines.join("\\n");
 }
 
 function canPrompt() {
@@ -105,13 +123,21 @@ function readCaptchaToken(type = "visa") {
 
 function parsePayloadOptions(args, { defaultCaptchaType = "visa" } = {}) {
   const dataIdx = args.indexOf("--data");
+  const dataRawIdx = args.indexOf("--data-raw");
   const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
+  const dataRawStr = dataRawIdx !== -1 ? args[dataRawIdx + 1] : null;
   let payload = undefined;
   if (dataStr !== null) {
     try {
       payload = JSON.parse(dataStr);
     } catch {
       payload = dataStr;
+    }
+  } else if (dataRawStr !== null) {
+    try {
+      payload = JSON.parse(dataRawStr);
+    } catch {
+      payload = dataRawStr;
     }
   }
   const captchaTypeIndex = args.indexOf("--captcha-type");
@@ -122,7 +148,9 @@ function parsePayloadOptions(args, { defaultCaptchaType = "visa" } = {}) {
 
 function injectCaptchaToken(payload, captchaToken) {
   if (!captchaToken) return payload;
-  if (payload === undefined || payload === null) return { captchaToken };
+  if (payload === undefined || payload === null) {
+    return { captchaToken, recaptchaToken: captchaToken };
+  }
   if (typeof payload === "string") {
     try {
       payload = JSON.parse(payload);
@@ -133,7 +161,13 @@ function injectCaptchaToken(payload, captchaToken) {
       return payload;
     }
   }
-  return typeof payload === "object" ? { ...payload, captchaToken } : payload;
+  return typeof payload === "object"
+    ? {
+        ...payload,
+        captchaToken: payload?.captchaToken || captchaToken,
+        recaptchaToken: payload?.recaptchaToken || captchaToken,
+      }
+    : payload;
 }
 
 function writePrivateJson(path, data) {
@@ -409,6 +443,26 @@ function readEntityId() {
   } catch {
     return null;
   }
+}
+
+function readStoredGroupId() {
+  const filePath = process.env.ENTITY_CONFIG_PATH || "entity.json";
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8")).groupId || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredGroupId(groupId) {
+  const entityPath = process.env.ENTITY_CONFIG_PATH || "entity.json";
+  const existing = existsSync(entityPath)
+    ? JSON.parse(readFileSync(entityPath, "utf8"))
+    : {};
+  writePrivateJson(entityPath, {
+    ...existing,
+    groupId: String(groupId),
+  });
 }
 
 async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = {}) {
@@ -740,6 +794,17 @@ async function selectGroup() {
   if (!selected) return null;
   console.log(`Selected: ${selected.name} (ID: ${selected.id})`);
   return selected;
+}
+
+async function cmdSetGroupId(args = []) {
+  const value = args[0] || null;
+  if (!value) {
+    console.error("Group ID is required. Usage: nusuk set-group-id <group-id>");
+    process.exitCode = 1;
+    return;
+  }
+  writeStoredGroupId(value);
+  console.log(`Stored group ID: ${value}`);
 }
 
 async function cmdCaptchaSet(args = []) {
@@ -1119,6 +1184,14 @@ async function refreshVisaCaptcha(entityId, endpoint) {
   return captcha;
 }
 
+async function warmVisaConnection(nusuk, targetTime) {
+  const warmupSamples = await calibrate(nusuk, 5, "Warm-up");
+  return computeSendSchedule(targetTime, warmupSamples, {
+    jitterBufferMs: 40,
+    clientOverheadMs: 80,
+  });
+}
+
 async function cmdSendVisa(args) {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`Usage: nusuk send-visa <group-id> [--target HH:MM:SS|--schedule HH:MM:SS] [--data '{"key":"value"}'] [--captcha] [--captcha-type <type>] [--no-test] [--endpoint <url>] [--test-path <path>]`);
@@ -1146,6 +1219,17 @@ async function cmdSendVisa(args) {
   const { payload: dataPayload, captchaType, useCaptcha } = parsePayloadOptions(args, { defaultCaptchaType: "visa" });
 
   if (!groupId) {
+    groupId = process.env.GROUP_ID || null;
+  }
+  if (!groupId && canPrompt()) {
+    groupId = readStoredGroupId() || null;
+  }
+  if (typeof groupId === "string") groupId = groupId.trim();
+  if (!groupId && !canPrompt()) {
+    console.error("Group ID is required in non-interactive mode. Pass a group ID or set one with `nusuk set-group-id <id>`.");
+    process.exit(1);
+  }
+  if (!groupId) {
     const selected = await selectGroup();
     if (!selected) {
       console.log("Cancelled.");
@@ -1154,7 +1238,7 @@ async function cmdSendVisa(args) {
     groupId = selected.id;
   }
   if (targetStr && !target) {
-    console.error("Invalid target time. Use HH:MM:SS[.mmm] or HH:MM:SS:mmm");
+    console.error("Invalid target time. Use HH:MM:SS[.mmm] or HH:MM:SS:mmm, and it must be in the future.");
     process.exit(1);
   }
 
@@ -1216,13 +1300,19 @@ async function cmdSendVisa(args) {
     }
 
     const sendAt = target ? target.getTime() : Date.now();
+    const now = Date.now();
+    if (target && sendAt <= now) {
+      console.error("Target time is already in the past; aborting request.");
+      process.exitCode = 1;
+      return;
+    }
     const refreshAt = sendAt - CAPTCHA_REFRESH_AHEAD;
-    const firstWait = refreshAt - Date.now();
+    const firstWait = refreshAt - now;
     const tokenEntityId = nusuk.entityId || entityId;
 
     if (firstWait > 0) {
       console.log(
-        `  refreshing visa captcha at ${formatTime(new Date(refreshAt))} (20s before execute)...`
+        `  refreshing visa captcha at ${formatTime(new Date(refreshAt))} (20s before target)...`
       );
       await new Promise((r) => setTimeout(r, firstWait));
     }
@@ -1244,26 +1334,57 @@ async function cmdSendVisa(args) {
       }
     }
 
-    const secondWait = sendAt - Date.now();
+    let schedule = null;
+    if (target) {
+      schedule = await warmVisaConnection(nusuk, target);
+      console.log(`  target           : ${formatTime(target)}`);
+      console.log(`  estimated one-way: ${ms(schedule.oneWayMs)}`);
+      console.log(`  send at          : ${formatTime(schedule.sendAt)} (${ms(schedule.sendAheadMs)} ahead)`);
+    }
+
+    const actualSendAt = target ? schedule.sendAt.getTime() : sendAt;
+    const secondWait = actualSendAt - Date.now();
     if (secondWait > 0) {
-      console.log(`  waiting ${ms(secondWait)} until execute (${formatTime(new Date(sendAt))})...`);
+      console.log(`  waiting ${ms(secondWait)} until execute (${formatTime(new Date(actualSendAt))})...`);
       await new Promise((r) => setTimeout(r, secondWait));
     }
 
-    payload = {
-      ...(payload || {}),
-      id: String(groupId),
-      captchaToken: payload?.captchaToken || readCaptchaToken(captchaType) || captcha,
-    };
+    const tokenValue = payload?.captchaToken || payload?.recaptchaToken || readCaptchaToken(captchaType) || captcha;
+    payload = buildVisaPayload(payload, groupId, tokenValue);
     const sendActual = Date.now();
+
+    const requestPreview = {
+      url: VISA_PATH,
+      method: "POST",
+      headers: await nusuk.buildRequestHeaders(),
+      payload,
+    };
+
+    console.log(`\n--- Request Preview ---`);
+    console.log(`  method  : ${requestPreview.method}`);
+    console.log(`  url     : ${requestPreview.url}`);
+    console.log(`  headers :`, JSON.stringify(requestPreview.headers, null, 2));
+    console.log(`  payload :`, JSON.stringify(requestPreview.payload, null, 2));
+    console.log(`  curl    :`);
+    console.log(formatCurlPreview(requestPreview.url, requestPreview.headers, requestPreview.payload));
+
     const res = await nusuk.request(VISA_PATH, { method: "POST", payload });
+    const responseReceived = Date.now();
+    const timing = summarizeRequestTiming({
+      sendAt: new Date(sendActual),
+      responseReceivedAt: new Date(responseReceived),
+      response: res,
+    });
 
     console.log(`\n--- Result ---`);
-    console.log(`  sent at  : ${formatTime(new Date(sendActual))}`);
-    console.log(`  status   : ${res.status}`);
-    if (res.timing) console.log(`  timing   : ${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
-    if (res.json) console.log(`  response :`, JSON.stringify(res.json, null, 2).slice(0, 600));
-    else console.log(`  body     :`, String(res.body).slice(0, 600));
+    console.log(`  sent at          : ${formatTime(timing.sendAt)}`);
+    console.log(`  response received: ${formatTime(timing.responseReceivedAt)}`);
+    console.log(`  elapsed          : ${ms(timing.elapsedMs)}`);
+    console.log(`  response date    : ${timing.serverDateHeader || "(none)"}`);
+    console.log(`  status           : ${res.status}`);
+    if (res.timing) console.log(`  timing           : ${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
+    if (res.json) console.log(`  response         :`, JSON.stringify(res.json, null, 2).slice(0, 600));
+    else console.log(`  body             :`, String(res.body).slice(0, 600));
 
     if (res.status !== 200) process.exitCode = 1;
   } finally {
@@ -1308,6 +1429,7 @@ Common tasks:
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
   send <group-id>       Send a visa request
+  set-group-id <id>     Store a default group ID for future sends
   request <path>        Send a custom API request
   api <name>            Run a saved request from the catalog
   groups list           Show group names and IDs
@@ -1409,6 +1531,9 @@ async function main() {
       break;
     case "schedule":
       await cmdSchedule(args);
+      break;
+    case "set-group-id":
+      await cmdSetGroupId(args);
       break;
     case "send":
     case "send-visa":
