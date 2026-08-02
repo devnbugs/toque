@@ -8,7 +8,7 @@
  * Usage:
  *   const worker = new AuthaWorker({ entityId: "525513" });
  *   const token   = await worker.fetchLatestAuthToken();
- *   const captcha = await worker.fetchLatestCaptcha("visa");
+ *   const captcha = await worker.fetchLatestCaptcha(undefined, "visa");
  */
 
 import { readFileSync } from "fs";
@@ -72,9 +72,12 @@ export class AuthaWorker {
   async fetchContext(entityId, { refresh = false } = {}) {
     const eid = entityId || this.entityId;
     if (!eid) throw new Error("Entity ID required (pass entityId or --entity)");
-    if (!refresh && this._contextCache.has(eid)) return this._contextCache.get(eid);
-    const context = await this._get(`/api/entity/${encodeURIComponent(eid)}/context`);
-    this._contextCache.set(eid, context);
+    const cacheKey = String(eid);
+    if (!refresh && this._contextCache.has(cacheKey)) {
+      return this._contextCache.get(cacheKey);
+    }
+    const context = await this._get(`/api/entity/${encodeURIComponent(cacheKey)}/context`);
+    this._contextCache.set(cacheKey, context);
     return context;
   }
 
@@ -108,7 +111,7 @@ export class AuthaWorker {
     }
 
     try {
-      const json = await this._get(`/entity/${eid}/token/latest`);
+      const json = await this._get(`/entity/${encodeURIComponent(eid)}/token/latest`);
       const record = json.latestAuthToken;
       const token = this.extractToken(record);
       if (token) {
@@ -160,7 +163,7 @@ export class AuthaWorker {
 
   /**
    * Pull the latest captcha token captured for an entity.
-  * type: "login" | "visa" | "general". Falls back across types unless strict.
+    * type: "login" | "visa" | "general". Falls back across types unless strict.
    */
   async fetchLatestCaptcha(entityId, type = "visa", { strict = false } = {}) {
     const eid = entityId || this.entityId;
@@ -198,10 +201,10 @@ export class AuthaWorker {
     for (const t of order) {
       const path =
         t === "login"
-          ? `/entity/${eid}/captcha/login`
+          ? `/entity/${encodeURIComponent(eid)}/captcha/login`
           : t === "visa"
-            ? `/entity/${eid}/captcha/visa`
-            : `/entity/${eid}/captcha`;
+            ? `/entity/${encodeURIComponent(eid)}/captcha/visa`
+            : `/entity/${encodeURIComponent(eid)}/captcha`;
       try {
         const json = await this._get(path);
         const latest = json.latestCaptcha || json.fallbackGeneralCaptcha || null;
@@ -217,6 +220,7 @@ export class AuthaWorker {
     if (!record || typeof record !== "object") return null;
     const candidates = [
       record.token,
+      record.authToken,
       record.payload?.token,
       record.payload?.authToken,
       record.headers?.request?.authorization,
