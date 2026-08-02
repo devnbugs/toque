@@ -11,11 +11,10 @@ test("parseTargetTime accepts bounded times and normalizes fractional millisecon
   assert.equal(target.getMilliseconds(), 500);
 });
 
-test("parseTargetTime rolls elapsed times to the next day", () => {
+test("parseTargetTime rejects elapsed times in the past", () => {
   const now = new Date(2026, 0, 1, 10, 0, 0, 0);
   const target = parseTargetTime("09:59:59:250", now);
-  assert.equal(target.getDate(), 2);
-  assert.equal(target.getMilliseconds(), 250);
+  assert.equal(target, null);
 });
 
 test("parseTargetTime rejects malformed and out-of-range input", () => {

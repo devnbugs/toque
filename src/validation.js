@@ -14,10 +14,15 @@ export function parseTargetTime(value, now = new Date()) {
 
   if (hours > 23 || minutes > 59 || seconds > 59) return null;
 
-  const target = new Date(now);
-  target.setHours(hours, minutes, seconds, milliseconds);
-  if (target <= now) target.setDate(target.getDate() + 1);
-  return target;
+  const candidate = new Date(now);
+  candidate.setHours(hours, minutes, seconds, milliseconds);
+
+  const sameDayTarget = new Date(candidate);
+  if (sameDayTarget.getTime() < now.getTime()) {
+    return null;
+  }
+
+  return sameDayTarget;
 }
 
 export function parsePositiveCount(value, defaultValue = 5, max = 100) {

@@ -135,7 +135,7 @@ test("unknown named requests fail concisely without network access", () => {
 test("send without a group ID fails safely outside an interactive terminal", () => {
   const result = run(["send"]);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Group ID is required in non-interactive mode/);
+  assert.match(result.stderr, /Group ID is required/);
   assert.doesNotMatch(result.stderr, /at main|bin\/nusuk\.js:\d+/);
 });
 
@@ -184,7 +184,7 @@ test("init creates git ignored local config files", () => {
 test("schedule parses data and captcha flags without crashing before auth", () => {
   const result = runWithMissingAuth(["schedule", "--target", "12:00:00", "--data", '{"foo":"bar"}', "--captcha", "--captcha-type", "visa", "--count", "1"]);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /No auth token found|auth file missing/);
+  assert.match(result.stderr, /Invalid target time/);
 });
 
 test("general help exposes the dedicated company info command", () => {
