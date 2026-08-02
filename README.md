@@ -23,6 +23,7 @@ nusuk schedule --target HH:MM:SS        Schedule request for server arrival
        [--count 5]
 nusuk captcha-set                       Set captcha token (via CAPTCHA_TOKEN env)
 nusuk captcha-show                      Show stored captcha token
+nusuk pull --entity <id>                Pull auth, CAPTCHA, and entity context from D1
 ```
 
 ### Examples
@@ -86,6 +87,13 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 | `CAPTCHA_TOKEN` | — | Captcha token value for `captcha-set` |
 | `WORKER_URL` | Autha Worker URL | Worker API endpoint used by `pull` |
 | `WORKER_API_TOKEN` | — | Required bearer token for Worker reads |
+
+## D1 Worker integration
+
+`nusuk pull` uses one optimized request to
+`/api/entity/{entityId}/context`. The response contains the latest auth token,
+CAPTCHA variants, and automatically captured entity headers. Toque updates
+`auth.json`, `captcha.json`, and `entity.json` from that response.
 
 ## Programmatic API
 

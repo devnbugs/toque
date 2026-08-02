@@ -128,13 +128,19 @@ async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = 
     console.log(`Pulling from ${worker.endpoint} (entity ${entityId}, system user ${worker.systemUserId}, captcha type ${type})...\n`);
   }
 
-  const [token, captcha] = await Promise.all([
-    worker.fetchLatestAuthToken(entityId),
-    worker.fetchLatestCaptcha(entityId, type),
-  ]);
+  const context = await worker.fetchContext(entityId, { refresh: true });
+  const token = worker.extractToken(context.auth);
+  const captchaOptions = context.captcha || {};
+  const captchaOrder = type === "login"
+    ? [captchaOptions.login, captchaOptions.latest, captchaOptions.visa]
+    : type === "general"
+      ? [captchaOptions.latest, captchaOptions.visa, captchaOptions.login]
+      : [captchaOptions.visa, captchaOptions.latest, captchaOptions.login];
+  const captcha = captchaOrder.find((entry) => entry?.captchaToken)?.captchaToken || null;
 
   const authPath = process.env.AUTH_PATH || "auth.json";
   const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
+  const entityPath = process.env.ENTITY_CONFIG_PATH || "entity.json";
 
   if (token) {
     writeFileSync(
@@ -153,6 +159,21 @@ async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = 
     );
   }
 
+  const capturedEntity = context.entity || {};
+  if (capturedEntity.entityId || entityId) {
+    const existingEntity = existsSync(entityPath)
+      ? JSON.parse(readFileSync(entityPath, "utf8"))
+      : {};
+    writeFileSync(entityPath, JSON.stringify({
+      ...existingEntity,
+      activeEntityId: capturedEntity.activeEntityId || capturedEntity.entityId || entityId,
+      activeEntityTypeId: capturedEntity.activeEntityTypeId || existingEntity.activeEntityTypeId,
+      entityId: capturedEntity.entityId || entityId,
+      entityTypeId: capturedEntity.entityTypeId || capturedEntity.activeEntityTypeId || existingEntity.entityTypeId,
+      systemUserId: context.systemUserId || worker.systemUserId,
+    }, null, 2) + "\n");
+  }
+
   const creds = findCreds();
   if (creds && (token || captcha)) {
     const data = JSON.parse(readFileSync(creds, "utf8"));
@@ -169,7 +190,7 @@ async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = 
     if (!quiet) console.log(`  merged into ${creds}`);
   }
 
-  return { token, captcha, authPath, captchaPath };
+  return { token, captcha, authPath, captchaPath, entityPath, context };
 }
 
 async function cmdPull(args) {
@@ -509,7 +530,7 @@ Usage:
   nusuk captcha-set                   Set captcha token (via CAPTCHA_TOKEN env)
   nusuk captcha-show                  Show stored captcha token
   nusuk pull [--entity <id>]          Pull latest auth token + captcha from the
-       [--type login|visa|general]      autha-worker KV into auth.json/captcha.json
+      [--type login|visa|general]      D1-backed worker into local credential files
        [--endpoint <url>]
 
   request/schedule auto-create auth.json + captcha.json from the worker

@@ -1,5 +1,5 @@
 /**
- * AuthaWorker — client for the autha-worker Cloudflare Worker KV REST API.
+ * AuthaWorker — client for the D1-backed autha-worker REST API.
  *
  * Pulls the latest captured auth token and captcha token that the browser
  * extension saved to the worker, so toque can use them for actions without
@@ -30,6 +30,7 @@ export class AuthaWorker {
       this._readEntityFile()?.systemUserId ||
       "default";
     this.apiToken = config.apiToken || process.env.WORKER_API_TOKEN || "";
+    this._contextCache = new Map();
   }
 
   _readEntityFile() {
@@ -67,6 +68,15 @@ export class AuthaWorker {
     return json;
   }
 
+  async fetchContext(entityId, { refresh = false } = {}) {
+    const eid = entityId || this.entityId;
+    if (!eid) throw new Error("Entity ID required (pass entityId or --entity)");
+    if (!refresh && this._contextCache.has(eid)) return this._contextCache.get(eid);
+    const context = await this._get(`/api/entity/${encodeURIComponent(eid)}/context`);
+    this._contextCache.set(eid, context);
+    return context;
+  }
+
   /**
    * Pull the latest auth token (Bearer) captured for an entity.
    * Searches the newest AUTH_TOKEN / SYNC records and extracts the token.
@@ -76,11 +86,19 @@ export class AuthaWorker {
     if (!eid) throw new Error("Entity ID required (pass entityId or --entity)");
 
     try {
-      const json = await this._get(`/entity/${eid}/token/latest`);
-      const token = this._extractToken(json.latestAuthToken);
+      const context = await this.fetchContext(eid);
+      const token = this.extractToken(context.auth);
       if (token) return token;
     } catch {
-      // fall back to the record scan below
+      // Fall back to the legacy endpoint during staged Worker upgrades.
+    }
+
+    try {
+      const json = await this._get(`/entity/${eid}/token/latest`);
+      const token = this.extractToken(json.latestAuthToken);
+      if (token) return token;
+    } catch {
+      // Fall back to the record scan below.
     }
 
     const list = await this._get(
@@ -98,7 +116,7 @@ export class AuthaWorker {
     for (const r of candidates) {
       try {
         const rec = await this._get(`/records/${encodeURIComponent(r.key)}`);
-        const token = this._extractToken(rec.record);
+        const token = this.extractToken(rec.record);
         if (token) return token;
       } catch {
         // record may have been purged/deleted — skip and try the next
@@ -114,6 +132,20 @@ export class AuthaWorker {
   async fetchLatestCaptcha(entityId, type = "visa") {
     const eid = entityId || this.entityId;
     if (!eid) throw new Error("Entity ID required (pass entityId or --entity)");
+
+    try {
+      const context = await this.fetchContext(eid);
+      const captcha = context.captcha || {};
+      const order = type === "login"
+        ? [captcha.login, captcha.latest, captcha.visa]
+        : type === "general"
+          ? [captcha.latest, captcha.visa, captcha.login]
+          : [captcha.visa, captcha.latest, captcha.login];
+      const found = order.find((entry) => entry?.captchaToken);
+      if (found) return found.captchaToken;
+    } catch {
+      // Fall back to individual endpoints during staged Worker upgrades.
+    }
 
     const order =
       type === "login"
@@ -138,9 +170,10 @@ export class AuthaWorker {
     return null;
   }
 
-  _extractToken(record) {
+  extractToken(record) {
     if (!record || typeof record !== "object") return null;
     const candidates = [
+      record.token,
       record.payload?.token,
       record.payload?.authToken,
       record.headers?.request?.authorization,
