@@ -7,11 +7,12 @@ const DEFAULT_BASE_URL = "https://masar.nusuk.sa";
 export class Nusuk {
   constructor(config = {}) {
     this.baseUrl = config.baseUrl || DEFAULT_BASE_URL;
+    const base = new URL(this.baseUrl);
     this.browserOptions = config.browserOptions || { headless: true };
     this.defaultHeaders = {
       Accept: "application/json, text/plain, */*",
-      Origin: config.origin || "https://masar.nusuk.sa",
-      Referer: config.referer || "https://masar.nusuk.sa/umrah/reception-area/dashboard/uo",
+      Origin: config.origin || base.origin,
+      Referer: config.referer || new URL("/umrah/reception-area/dashboard/uo", base).toString(),
       ...(config.defaultHeaders || {}),
     };
     this.browser = null;
@@ -36,6 +37,28 @@ export class Nusuk {
     const authInfo = parsed?.response?.data?.authInfo;
     const token = requireJwt(authInfo?.userToken, "response.data.authInfo.userToken");
     this.setAuthToken(token);
+    if (parsed?.entityId) {
+      this.setEntityId(parsed.entityId);
+      if (parsed.entityTypeId && !this.entityTypeId) {
+        this.setEntityTypeId(parsed.entityTypeId);
+      }
+    }
+    return this;
+  }
+
+  setEntityId(entityId) {
+    if (entityId) {
+      this.entityId = String(entityId);
+      this.defaultHeaders["activeentityid"] = String(entityId);
+    }
+    return this;
+  }
+
+  setEntityTypeId(entityTypeId) {
+    if (entityTypeId) {
+      this.entityTypeId = String(entityTypeId);
+      this.defaultHeaders["activeentitytypeid"] = String(entityTypeId);
+    }
     return this;
   }
 
@@ -68,23 +91,17 @@ export class Nusuk {
   }
 
   loadEntity(config = {}) {
-    let id = config.activeEntityId;
-    let typeId = config.activeEntityTypeId;
+    const filePath = config.path || process.env.ENTITY_CONFIG_PATH || "entity.json";
+    let file = {};
+    try {
+      file = JSON.parse(readFileSync(filePath, "utf8"));
+    } catch {}
 
-    if (!id && !typeId) {
-      const filePath = config.path || process.env.ENTITY_CONFIG_PATH || "entity.json";
-      try {
-        const file = JSON.parse(readFileSync(filePath, "utf8"));
-        id = id || file.activeEntityId;
-        typeId = typeId || file.activeEntityTypeId;
-      } catch {}
-    }
+    const id = config.activeEntityId || process.env.ACTIVE_ENTITY_ID || file.activeEntityId;
+    const typeId = config.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID || file.activeEntityTypeId;
 
-    id = id || process.env.ACTIVE_ENTITY_ID;
-    typeId = typeId || process.env.ACTIVE_ENTITY_TYPE_ID;
-
-    if (id) this.defaultHeaders["activeentityid"] = String(id);
-    if (typeId) this.defaultHeaders["activeentitytypeid"] = String(typeId);
+    if (id && !this.entityId) this.setEntityId(id);
+    if (typeId && !this.entityTypeId) this.setEntityTypeId(typeId);
     return this;
   }
 
@@ -108,7 +125,11 @@ export class Nusuk {
   async _ensureOrigin() {
     const currentUrl = this.page.url();
     const { origin } = new URL(this.baseUrl);
-    if (!currentUrl || !currentUrl.startsWith(origin)) {
+    let currentOrigin = null;
+    try {
+      currentOrigin = new URL(currentUrl).origin;
+    } catch {}
+    if (currentOrigin !== origin) {
       await this.page.goto(this.baseUrl, {
         waitUntil: "domcontentloaded",
         timeout: 60000,
@@ -119,6 +140,12 @@ export class Nusuk {
   async request(path, { method = "GET", payload = null, headers = {}, credentials = "include", mode = "cors", redirect = "follow" } = {}) {
     if (!this.page) {
       throw new Error("Nusuk not initialized. Call await nusuk.init() first.");
+    }
+
+    const requestUrl = new URL(path, this.baseUrl);
+    const allowedOrigin = new URL(this.baseUrl).origin;
+    if (requestUrl.origin !== allowedOrigin) {
+      throw new Error(`Refusing cross-origin request to ${requestUrl.origin}`);
     }
 
     await this._ensureOrigin();
@@ -167,7 +194,7 @@ export class Nusuk {
         };
       },
       {
-        url: new URL(path, this.baseUrl).toString(),
+        url: requestUrl.toString(),
         options: (() => {
           const opts = {
             method,

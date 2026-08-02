@@ -2,6 +2,14 @@
   "name": "nusuk-request-handler",
   "version": "1.0.0",
   "type": "module",
+  "description": "Authenticated Nusuk API request CLI and Node.js client",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/nusuk.js && node --check src/*.js && node --check reqTook.js && node --check senReq.js"
+  },
   "bin": {
     "nusuk": "./bin/nusuk.js"
   },

@@ -4,6 +4,8 @@ CLI tool and Node.js module for making authenticated requests to [Masar Nusuk](h
 
 ## Install
 
+Requires Node.js 20 or later.
+
 ```bash
 npm install
 ```
@@ -61,7 +63,8 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 |---|---|---|
 | `creds.json` | Merged creds file (auth + captcha together) | ignored |
 | `auth.json` | Auth tokens (`response.data.authInfo.userToken`) — fallback if not in `creds.json` | ignored |
-| `entity.json` | Entity headers (`activeEntityId`, `activeEntityTypeId`) | tracked |
+| `entity.json` | Local entity headers (`activeEntityId`, `activeEntityTypeId`) | ignored |
+| `entity.example.json` | Safe entity configuration template | tracked |
 | `captcha.json` | Captcha token (`captchaToken`) — fallback if not in `creds.json` | ignored |
 
 `creds.json` combines both auth and captcha in one file:

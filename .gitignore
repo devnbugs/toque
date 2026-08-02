@@ -2,6 +2,7 @@ node_modules/
 auth.json
 captcha.json
 creds.json
+entity.json
 .env
 .env.*
 !.env.example

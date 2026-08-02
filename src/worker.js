@@ -86,7 +86,8 @@ export class AuthaWorker {
 
   /**
    * Pull the latest auth token (Bearer) captured for an entity.
-   * Searches the newest AUTH_TOKEN / SYNC records and extracts the token.
+   * Returns { token, entityId, timestamp } so the token can be used with
+   * its own entity. Searches the newest AUTH_TOKEN / SYNC records.
    */
   async fetchLatestAuthToken(entityId) {
     const eid = entityId || this.entityId;
@@ -95,22 +96,40 @@ export class AuthaWorker {
     try {
       const context = await this.fetchContext(eid);
       const token = this.extractToken(context.auth);
-      if (token) return token;
+      if (token) {
+        return {
+          token,
+          entityId: String(context.entityId || context.entity?.entityId || eid),
+          timestamp: Number(context.auth?.timestamp || 0),
+        };
+      }
     } catch {
       // Fall back to the legacy endpoint during staged Worker upgrades.
     }
 
     try {
       const json = await this._get(`/entity/${eid}/token/latest`);
-      const token = this.extractToken(json.latestAuthToken);
-      if (token) return token;
+      const record = json.latestAuthToken;
+      const token = this.extractToken(record);
+      if (token) {
+        return {
+          token,
+          entityId: String(record?.entityId || json.entityId || eid),
+          timestamp: Number(record?.timestamp || json.metadata?.timestamp || 0),
+        };
+      }
     } catch {
       // Fall back to the record scan below.
     }
 
-    const list = await this._get(
-      `/records?prefix=${encodeURIComponent(`entity_${eid}_`)}&limit=200`
-    );
+    let list;
+    try {
+      list = await this._get(
+        `/records?prefix=${encodeURIComponent(`entity_${eid}_`)}&limit=200`
+      );
+    } catch {
+      return null;
+    }
 
     const candidates = (list.records || [])
       .filter((r) => {
@@ -124,7 +143,14 @@ export class AuthaWorker {
       try {
         const rec = await this._get(`/records/${encodeURIComponent(r.key)}`);
         const token = this.extractToken(rec.record);
-        if (token) return token;
+        if (!token) continue;
+        return {
+          token,
+          entityId: String(
+            rec.record?.entityId || rec.record?.activeEntityId || r.metadata?.entityId || eid
+          ),
+          timestamp: Number(r.metadata?.timestamp || 0),
+        };
       } catch {
         // record may have been purged/deleted — skip and try the next
       }

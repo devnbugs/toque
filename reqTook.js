@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Nusuk } from "./src/nusuk.js";
+import { parsePositiveCount, parseTargetTime } from "./src/validation.js";
 
 function ms(ms) {
   return `${ms}ms`;
@@ -7,22 +8,6 @@ function ms(ms) {
 
 function formatTime(date) {
   return date.toTimeString().slice(0, 8) + "." + String(date.getMilliseconds()).padStart(3, "0");
-}
-
-function parseTarget(str) {
-  let parts = str.split(":");
-  if (parts.length < 3 || parts.length > 4) return null;
-  const ms = parts.length === 4 ? Number(parts[3]) : 0;
-  const secParts = parts[2].split(".");
-  const s = Number(secParts[0]);
-  const msFromSec = Number(secParts[1]) || 0;
-  const [h, m] = parts.map(Number);
-  if ([h, m, s].some(isNaN)) return null;
-  const now = new Date();
-  const target = new Date(now);
-  target.setHours(h, m, s, ms || msFromSec);
-  if (target <= now) target.setDate(target.getDate() + 1);
-  return target;
 }
 
 async function benchmark(nusuk, count = 5) {
@@ -68,9 +53,13 @@ async function main() {
   const targetIdx = args.indexOf("--target");
   const targetStr = targetIdx !== -1 ? args[targetIdx + 1] : null;
   const countIdx = args.indexOf("--count");
-  const count = countIdx !== -1 ? parseInt(args[countIdx + 1], 10) || 5 : 5;
+  const count = parsePositiveCount(countIdx !== -1 ? args[countIdx + 1] : undefined);
 
-  if (targetStr && !parseTarget(targetStr)) {
+  if (count === null) {
+    console.error("Count must be an integer from 1 to 100");
+    process.exit(1);
+  }
+  if (targetStr && !parseTargetTime(targetStr)) {
     console.error("Invalid target time. Use HH:MM:SS format, e.g. --target 22:00:00");
     process.exit(1);
   }
@@ -82,7 +71,7 @@ async function main() {
     const { oneway, netOneWay } = await benchmark(nusuk, count);
 
     if (targetStr) {
-      const target = parseTarget(targetStr);
+      const target = parseTargetTime(targetStr);
       const safety = 50;
       const sendAhead = (netOneWay || oneway) + safety;
       const sendAt = new Date(target.getTime() - sendAhead);
