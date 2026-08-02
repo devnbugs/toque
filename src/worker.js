@@ -12,6 +12,7 @@
  */
 
 import { readFileSync } from "fs";
+import { parseJwt } from "./jwt.js";
 
 const DEFAULT_ENDPOINT = "https://autha-worker.decloud.workers.dev";
 
@@ -183,7 +184,8 @@ export class AuthaWorker {
     ];
     for (const c of candidates) {
       if (typeof c === "string" && c.trim()) {
-        return c.replace(/^Bearer\s+/i, "").trim();
+        const parsed = parseJwt(c);
+        if (parsed) return parsed.token;
       }
     }
     return null;

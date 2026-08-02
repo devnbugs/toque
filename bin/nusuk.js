@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import { Nusuk } from "../src/nusuk.js";
 import { AuthaWorker } from "../src/worker.js";
+import { parseJwt } from "../src/jwt.js";
 
 function ms(ms) {
   return `${ms}ms`;
@@ -46,7 +47,7 @@ function findAuth() {
   if (creds) {
     try {
       const data = JSON.parse(readFileSync(creds, "utf8"));
-      if (data?.response?.data?.authInfo?.userToken) return creds;
+      if (parseJwt(data?.response?.data?.authInfo?.userToken)) return creds;
     } catch {}
   }
   const candidates = [
@@ -58,7 +59,7 @@ function findAuth() {
     if (p && existsSync(p)) {
       try {
         const data = JSON.parse(readFileSync(p, "utf8"));
-        if (data?.response?.data?.authInfo?.userToken) return p;
+        if (parseJwt(data?.response?.data?.authInfo?.userToken)) return p;
       } catch {}
     }
   }

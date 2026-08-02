@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
 import { launch } from "cloakbrowser";
+import { parseJwt, requireJwt } from "./jwt.js";
 
 const DEFAULT_BASE_URL = "https://masar.nusuk.sa";
 
@@ -25,7 +26,7 @@ export class Nusuk {
     } catch {
       parsed = null;
     }
-    if (!parsed?.response?.data?.authInfo?.userToken) {
+    if (!parseJwt(parsed?.response?.data?.authInfo?.userToken)) {
       try {
         parsed = JSON.parse(readFileSync(credsPath, "utf8"));
       } catch {
@@ -33,10 +34,8 @@ export class Nusuk {
       }
     }
     const authInfo = parsed?.response?.data?.authInfo;
-    if (!authInfo?.userToken) {
-      throw new Error("auth file missing response.data.authInfo.userToken");
-    }
-    this.defaultHeaders["Authorization"] = `Bearer ${authInfo.userToken}`;
+    const token = requireJwt(authInfo?.userToken, "response.data.authInfo.userToken");
+    this.defaultHeaders["Authorization"] = `Bearer ${token}`;
     return this;
   }
 
