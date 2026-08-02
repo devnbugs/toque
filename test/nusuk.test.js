@@ -23,6 +23,24 @@ test("loadEntity applies explicit, environment, then file precedence per field",
   }
 });
 
+test("loadEntity refreshes entity headers from the current entity.json state", () => {
+  const directory = mkdtempSync(join(tmpdir(), "toque-entity-"));
+  const entityPath = join(directory, "entity.json");
+  writeFileSync(entityPath, JSON.stringify({ activeEntityId: "new-entity", activeEntityTypeId: "new-type" }));
+
+  const nusuk = new Nusuk();
+  nusuk.setEntityId("old-entity");
+  nusuk.setEntityTypeId("old-type");
+  nusuk.loadEntity({ path: entityPath });
+
+  assert.equal(nusuk.entityId, "new-entity");
+  assert.equal(nusuk.entityTypeId, "new-type");
+  assert.equal(nusuk.defaultHeaders["activeentityid"], "new-entity");
+  assert.equal(nusuk.defaultHeaders["entity-id"], "new-entity");
+  assert.equal(nusuk.defaultHeaders["activeentitytypeid"], "new-type");
+  rmSync(directory, { recursive: true, force: true });
+});
+
 test("request rejects cross-origin URLs before browser evaluation", async () => {
   let evaluated = false;
   const nusuk = new Nusuk({ baseUrl: "https://masar.nusuk.sa" });

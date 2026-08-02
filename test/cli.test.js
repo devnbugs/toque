@@ -139,6 +139,35 @@ test("send without a group ID fails safely outside an interactive terminal", () 
   assert.doesNotMatch(result.stderr, /at main|bin\/nusuk\.js:\d+/);
 });
 
+test("logout clears local auth, captcha, and entity state", () => {
+  const directory = mkdtempSync(join(tmpdir(), "toque-cli-logout-"));
+  const authPath = join(directory, "auth.json");
+  const captchaPath = join(directory, "captcha.json");
+  const entityPath = join(directory, "entity.json");
+  try {
+    writeFileSync(authPath, JSON.stringify({ response: { data: { authInfo: { userToken: "abc" } } } }), "utf8");
+    writeFileSync(captchaPath, JSON.stringify({ visa: "captcha-token" }), "utf8");
+    writeFileSync(entityPath, JSON.stringify({ activeEntityId: "123", groupId: "456" }), "utf8");
+
+    const result = run(["logout"], {
+      cwd: directory,
+      env: {
+        AUTH_PATH: authPath,
+        CAPTCHA_PATH: captchaPath,
+        ENTITY_CONFIG_PATH: entityPath,
+      },
+    });
+
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /Cleared local auth and entity state/i);
+    assert.deepEqual(JSON.parse(readFileSync(authPath, "utf8")), {});
+    assert.deepEqual(JSON.parse(readFileSync(captchaPath, "utf8")), {});
+    assert.deepEqual(JSON.parse(readFileSync(entityPath, "utf8")), {});
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("group pagination input is validated before network access", () => {
   const invalidLimit = run(["groups", "list", "--limit", "0"]);
   const invalidOffset = run(["groups", "list", "--offset", "-1"]);

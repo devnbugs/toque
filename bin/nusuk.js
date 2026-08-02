@@ -218,6 +218,27 @@ function ensureInitFiles() {
   return created;
 }
 
+function clearLocalState() {
+  const files = [
+    process.env.AUTH_PATH || "auth.json",
+    process.env.CAPTCHA_PATH || "captcha.json",
+    process.env.ENTITY_CONFIG_PATH || "entity.json",
+  ];
+
+  for (const path of files) {
+    if (!path) continue;
+    try {
+      writePrivateJson(path, {});
+    } catch {
+      try {
+        writeFileSync(path, "{}\n", { mode: 0o600 });
+      } catch {}
+    }
+  }
+
+  return files;
+}
+
 async function cmdInit(args) {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`Usage: nusuk init
@@ -521,6 +542,13 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
   }
 
   return { token, captcha, authPath, captchaPath, entityPath, entityId, context };
+}
+
+async function cmdLogout(args) {
+  const cleared = clearLocalState();
+  console.log(`Cleared local auth and entity state.`);
+  console.log(`  files   : ${cleared.join(", ")}`);
+  return cleared;
 }
 
 async function cmdLogin(args) {
@@ -1426,6 +1454,7 @@ Usage: nusuk <command> [options]
 Common tasks:
   init                  Create ignored local config files after a fresh clone
   login                 Install the latest user credentials
+  logout                Clear local auth, captcha, and entity state
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
   send <group-id>       Send a visa request
@@ -1528,6 +1557,10 @@ async function main() {
       break;
     case "init":
       await cmdInit(args);
+      break;
+    case "logout":
+    case "clear":
+      await cmdLogout(args);
       break;
     case "schedule":
       await cmdSchedule(args);

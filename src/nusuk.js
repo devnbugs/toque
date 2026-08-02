@@ -123,11 +123,15 @@ export class Nusuk {
       file = JSON.parse(readFileSync(filePath, "utf8"));
     } catch {}
 
-    const id = config.activeEntityId || process.env.ACTIVE_ENTITY_ID || file.activeEntityId;
-    const typeId = config.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID || file.activeEntityTypeId;
+    const id = config.activeEntityId || process.env.ACTIVE_ENTITY_ID || file.activeEntityId || file.entityId;
+    const typeId = config.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID || file.activeEntityTypeId || file.entityTypeId;
 
-    if (id && !this.entityId) this.setEntityId(id);
-    if (typeId && !this.entityTypeId) this.setEntityTypeId(typeId);
+    if (id !== undefined && id !== null && id !== "") {
+      this.setEntityId(id);
+    }
+    if (typeId !== undefined && typeId !== null && typeId !== "") {
+      this.setEntityTypeId(typeId);
+    }
     return this;
   }
 
