@@ -1,6 +1,7 @@
 {
   "activeEntityId": "525513",
-  "activeEntityTypeId": 32,
+  "activeEntityTypeId": "32",
   "systemUserId": "rhsalisu",
-  "entityId": "525513"
+  "entityId": "525513",
+  "entityTypeId": "32"
 }

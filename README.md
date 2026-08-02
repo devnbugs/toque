@@ -132,24 +132,19 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 
 | File | Purpose | Git |
 |---|---|---|
-| `creds.json` | Merged creds file (auth + captcha together) | ignored |
-| `auth.json` | Auth tokens (`response.data.authInfo.userToken`) — fallback if not in `creds.json` | ignored |
+| `auth.json` | Auth tokens (`response.data.authInfo.userToken`) | ignored |
 | `entity.json` | Local entity headers (`activeEntityId`, `activeEntityTypeId`) | ignored |
 | `entity.example.json` | Safe entity configuration template | tracked |
-| `captcha.json` | Captcha token (`captchaToken`) — fallback if not in `creds.json` | ignored |
+| `captcha.json` | Typed captcha tokens (`visa`, `login`, `general`) and fallback `captchaToken` | ignored |
 
-`creds.json` combines both auth and captcha in one file:
+`captcha.json` may contain typed fields for each captcha type and a generic fallback token:
 
 ```json
 {
-  "captchaToken": "...",
-  "response": {
-    "data": {
-      "authInfo": {
-        "userToken": "..."
-      }
-    }
-  }
+  "visa": "...",
+  "login": "...",
+  "general": "...",
+  "captchaToken": "..."
 }
 ```
 
@@ -160,12 +155,11 @@ Git and loaded automatically by the CLI and standalone scripts.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CREDS_PATH` | `creds.json` | Path to shared creds file (checked first) |
-| `AUTH_PATH` | `auth.json` | Path to auth file (fallback) |
+| `AUTH_PATH` | `auth.json` | Path to auth file |
 | `ENTITY_CONFIG_PATH` | `entity.json` | Path to entity config file |
 | `ACTIVE_ENTITY_ID` | — | Overrides entity ID (takes priority over file) |
 | `ACTIVE_ENTITY_TYPE_ID` | — | Overrides entity type ID |
-| `CAPTCHA_PATH` | `captcha.json` | Path to captcha file (fallback) |
+| `CAPTCHA_PATH` | `captcha.json` | Path to captcha file |
 | `CAPTCHA_TOKEN` | — | Captcha token value for `captcha-set` |
 | `WORKER_URL` | Autha Worker URL | Worker API endpoint used by `pull` |
 | `WORKER_API_TOKEN` | — | Required bearer token for Worker reads |
@@ -207,9 +201,9 @@ transient failures retry with bounded backoff. Use a separate `--output` and
 import { Nusuk } from "./src/nusuk.js";
 
 const nusuk = new Nusuk()
-  .loadAuth("auth.json")       // sets Authorization header (falls back to creds.json)
+  .loadAuth("auth.json")       // sets Authorization header
   .loadEntity()                 // reads entity.json for entity headers
-  .loadCaptcha("captcha.json"); // stores captchaToken (falls back to creds.json)
+  .loadCaptcha("captcha.json", "visa"); // loads typed captcha token
 
 await nusuk.init();
 
@@ -255,7 +249,6 @@ Weighted one-way: `(min_ttfb × 0.6 + avg_ttfb × 0.4) ÷ 2`
 ├── src/capsolver.js    # CapSolver client
 ├── senReq.js           # Original entry point
 ├── reqTook.js          # Standalone benchmark/scheduler
-├── creds.json          # Shared auth + captcha credentials (gitignored)
 ├── entity.json         # Entity configuration
 ├── package.json
 └── .gitignore

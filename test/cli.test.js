@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
@@ -14,6 +15,22 @@ function run(args = [], options = {}) {
     encoding: "utf8",
     input: options.input ?? "",
   });
+}
+
+function runWithMissingAuth(args = [], overrides = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "toque-cli-no-auth-"));
+  try {
+    return run(args, {
+      cwd: directory,
+      env: {
+        AUTH_PATH: join(directory, "auth.json"),
+        CAPTCHA_PATH: join(directory, "captcha.json"),
+        ...overrides,
+      },
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 test("no command is safe in non-interactive mode and prints concise help", () => {
@@ -131,8 +148,70 @@ test("group pagination input is validated before network access", () => {
   assert.match(invalidOffset.stderr, /offset must be a non-negative integer/i);
 });
 
+test("send-visa help is available and focused", () => {
+  const result = run(["send-visa", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: nusuk send-visa <group-id>/);
+  assert.match(result.stdout, /--data '{"key":"value"}'/);
+});
+
+test("send-visa parses data and captcha flags without crashing before auth", () => {
+  const result = runWithMissingAuth(["send-visa", "12345", "--data", '{"foo":"bar"}', "--captcha", "--captcha-type", "visa", "--no-test"], {
+    ACTIVE_ENTITY_ID: "123",
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /No auth token found|auth file missing/);
+});
+
+test("init creates git ignored local config files", () => {
+  const directory = mkdtempSync(join(tmpdir(), "toque-cli-init-"));
+  try {
+    const result = run(["init"], { cwd: directory });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /Created auth\.json/);
+    assert.match(result.stdout, /Created captcha\.json/);
+    assert.match(result.stdout, /Created entity\.json/);
+    assert.match(result.stdout, /Created \.env/);
+    assert.equal(true, existsSync(join(directory, "auth.json")));
+    assert.equal(true, existsSync(join(directory, "captcha.json")));
+    assert.equal(true, existsSync(join(directory, "entity.json")));
+    assert.equal(true, existsSync(join(directory, ".env")));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("schedule parses data and captcha flags without crashing before auth", () => {
+  const result = runWithMissingAuth(["schedule", "--target", "12:00:00", "--data", '{"foo":"bar"}', "--captcha", "--captcha-type", "visa", "--count", "1"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /No auth token found|auth file missing/);
+});
+
 test("general help exposes the dedicated company info command", () => {
   const result = run(["help"]);
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^\s*info\s+Show dashboard company information/m);
+});
+
+test("sync-time help is available and focused", () => {
+  const result = run(["sync-time", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: nusuk sync-time/);
+  assert.match(result.stdout, /--dry-run/);
+});
+
+test("sync-time dry-run can use a local time source file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "toque-cli-"));
+  const sourceFile = join(directory, "time.json");
+  try {
+    writeFileSync(sourceFile, JSON.stringify({ utc_datetime: "2026-08-02T12:34:56.789Z" }), "utf8");
+    const result = run(["sync-time", "--dry-run", "--source", pathToFileURL(sourceFile).href], {
+      cwd: directory,
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /Network time: 2026-08-02T12:34:56\.789Z/);
+    assert.match(result.stdout, /Dry run complete\. No system clock changes were made\./);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import "dotenv/config";
-import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { createInterface } from "readline/promises";
 import { stdin as input, stdout as output } from "process";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { Nusuk } from "../src/nusuk.js";
 import { AuthaWorker } from "../src/worker.js";
@@ -45,25 +45,13 @@ async function ask(question) {
   }
 }
 
-function findCreds() {
-  const candidates = [
-    process.env.CREDS_PATH,
-    "creds.json",
-    resolve(process.cwd(), "creds.json"),
-  ];
-  for (const p of candidates) {
-    if (p && existsSync(p)) return p;
-  }
-  return null;
+function hasCaptchaToken(data) {
+  return Boolean(
+    data?.captchaToken || data?.visa || data?.login || data?.general
+  );
 }
+
 function findAuth() {
-  const creds = findCreds();
-  if (creds) {
-    try {
-      const data = JSON.parse(readFileSync(creds, "utf8"));
-      if (parseJwt(data?.response?.data?.authInfo?.userToken)) return creds;
-    } catch {}
-  }
   const candidates = [
     process.env.AUTH_PATH,
     "auth.json",
@@ -81,13 +69,6 @@ function findAuth() {
 }
 
 function findCaptcha() {
-  const creds = findCreds();
-  if (creds) {
-    try {
-      const data = JSON.parse(readFileSync(creds, "utf8"));
-      if (data?.captchaToken) return creds;
-    } catch {}
-  }
   const candidates = [
     process.env.CAPTCHA_PATH,
     "captcha.json",
@@ -97,18 +78,62 @@ function findCaptcha() {
     if (p && existsSync(p)) {
       try {
         const data = JSON.parse(readFileSync(p, "utf8"));
-        if (data?.captchaToken) return p;
+        if (hasCaptchaToken(data)) return p;
       } catch {}
     }
   }
   return null;
 }
 
-function readCaptchaToken() {
+function readCaptchaToken(type = "visa") {
   const p = findCaptcha();
   if (!p) return null;
-  try { return JSON.parse(readFileSync(p, "utf8")).captchaToken || null; }
-  catch { return null; }
+  try {
+    const data = JSON.parse(readFileSync(p, "utf8"));
+    return (
+      data[type] ||
+      data.captchaToken ||
+      data.visa ||
+      data.login ||
+      data.general ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+function parsePayloadOptions(args, { defaultCaptchaType = "visa" } = {}) {
+  const dataIdx = args.indexOf("--data");
+  const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
+  let payload = undefined;
+  if (dataStr !== null) {
+    try {
+      payload = JSON.parse(dataStr);
+    } catch {
+      payload = dataStr;
+    }
+  }
+  const captchaTypeIndex = args.indexOf("--captcha-type");
+  const captchaType = captchaTypeIndex !== -1 ? args[captchaTypeIndex + 1] : defaultCaptchaType;
+  const useCaptcha = args.includes("--captcha");
+  return { payload, captchaType, useCaptcha };
+}
+
+function injectCaptchaToken(payload, captchaToken) {
+  if (!captchaToken) return payload;
+  if (payload === undefined || payload === null) return { captchaToken };
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      console.warn(
+        "Warning: --data payload is not valid JSON; captcha token cannot be injected automatically"
+      );
+      return payload;
+    }
+  }
+  return typeof payload === "object" ? { ...payload, captchaToken } : payload;
 }
 
 function writePrivateJson(path, data) {
@@ -136,18 +161,244 @@ function writeAuthToken(token, entityId) {
   if (entityId) data.entityId = String(entityId);
   writePrivateJson(authPath, data);
 }
-function writeCaptchaToken(token) {
-  const creds = findCreds();
-  if (creds) {
-    const existing = JSON.parse(readFileSync(creds, "utf8"));
-    existing.captchaToken = token;
-    writePrivateJson(creds, existing);
+
+function ensureInitFiles() {
+  const created = [];
+  const files = ["auth.json", "captcha.json", "entity.json"];
+  for (const file of files) {
+    if (!existsSync(file)) {
+      writePrivateJson(file, {});
+      created.push(file);
+    }
   }
+
+  if (!existsSync(".env")) {
+    if (existsSync(".env.example")) {
+      copyFileSync(".env.example", ".env");
+    } else {
+      writeFileSync(".env", "", { mode: 0o600 });
+    }
+    created.push(".env");
+  }
+
+  return created;
+}
+
+async function cmdInit(args) {
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(`Usage: nusuk init
+
+Creates ignored local configuration files after cloning the repository.
+`);
+    return;
+  }
+
+  const created = ensureInitFiles();
+  if (created.length === 0) {
+    console.log("All local ignored files already exist.");
+    return;
+  }
+  for (const file of created) {
+    console.log(`Created ${file}`);
+  }
+}
+
+function runCommandSync(command, args = []) {
+  return spawnSync(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function getTimeSource() {
+  return process.env.TIME_SYNC_SOURCE || "https://worldtimeapi.org/api/timezone/Etc/UTC";
+}
+
+function formatTimeSpan(msValue) {
+  return `${msValue >= 0 ? "+" : ""}${msValue}ms`;
+}
+
+function isFileSource(source) {
+  if (source.startsWith("file://")) return true;
+  return existsSync(source);
+}
+
+function fetchWithTool(source) {
+  const candidates = [
+    { command: "curl", args: ["-fsL", source] },
+    { command: "wget", args: ["-qO-", source] },
+  ];
+
+  for (const { command, args } of candidates) {
+    const result = runCommandSync(command, args);
+    if (result.status === 0 && result.stdout) {
+      return result.stdout;
+    }
+  }
+
+  throw new Error("No available HTTP fetch tool found (curl or wget) or all fetch attempts failed.");
+}
+
+async function fetchNetworkTime(source) {
+  if (isFileSource(source)) {
+    let sourcePath = source;
+    if (source.startsWith("file://")) {
+      sourcePath = fileURLToPath(source);
+    }
+    const raw = readFileSync(sourcePath, "utf8");
+    const data = JSON.parse(raw);
+    const remoteIso = data.utc_datetime || data.datetime || data.utcDateTime || data.currentDateTime || null;
+    if (!remoteIso) {
+      throw new Error("Time source file returned an unsupported payload");
+    }
+    const networkTime = new Date(remoteIso);
+    if (Number.isNaN(networkTime.getTime())) {
+      throw new Error("Time source file returned an invalid timestamp");
+    }
+    return networkTime;
+  }
+
+  let body;
+  try {
+    const response = await fetch(source, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Time source returned ${response.status} ${response.statusText}`);
+    }
+    body = await response.text();
+  } catch (error) {
+    body = fetchWithTool(source);
+  }
+
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch (error) {
+    throw new Error(`Failed to parse time source response: ${error.message}`);
+  }
+
+  const remoteIso = data.utc_datetime || data.datetime || data.utcDateTime || data.currentDateTime || null;
+  if (!remoteIso) {
+    throw new Error("Time source returned an unsupported payload");
+  }
+
+  const networkTime = new Date(remoteIso);
+  if (Number.isNaN(networkTime.getTime())) {
+    throw new Error("Time source returned an invalid timestamp");
+  }
+  return networkTime;
+}
+
+async function cmdSyncTime(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(`Usage: nusuk sync-time [--dry-run] [--source <url>]\n\nOptions:\n  --dry-run            Show network time and offset without changing system clock\n  --source <url>       Use a custom time source URL (default: ${getTimeSource()})\n`);
+    return;
+  }
+
+  const source = getArg("--source") || getTimeSource();
+  const dryRun = args.includes("--dry-run");
+  const pool = "pool.ntp.org";
+
+  if (dryRun) {
+    const networkTime = await fetchNetworkTime(source);
+    const localTime = new Date();
+    const offsetMs = networkTime.getTime() - localTime.getTime();
+    console.log(`Network time: ${networkTime.toISOString()}`);
+    console.log(`Local time  : ${localTime.toISOString()}`);
+    console.log(`Clock offset: ${formatTimeSpan(offsetMs)}`);
+    console.log("Dry run complete. No system clock changes were made.");
+    return;
+  }
+
+  if (process.platform === "win32") {
+    console.error("Automatic time synchronization is not supported on Windows by this CLI.");
+    process.exitCode = 1;
+    return;
+  }
+
+  if (typeof process.getuid === "function" && process.getuid() !== 0) {
+    console.error("Root privileges are required to set the system clock. Re-run as root or with sudo.");
+    process.exitCode = 1;
+    return;
+  }
+
+  if (process.platform === "linux") {
+    let result = runCommandSync("timedatectl", ["set-ntp", "true"]);
+    if (result.status === 0) {
+      console.log("Enabled timedatectl NTP sync.");
+      return;
+    }
+
+    result = runCommandSync("ntpdate", ["-u", pool]);
+    if (result.status === 0) {
+      console.log(result.stdout.trim() || "System time synchronized via ntpdate.");
+      return;
+    }
+
+    let networkTime;
+    try {
+      networkTime = await fetchNetworkTime(source);
+    } catch (error) {
+      console.error(error.message);
+      console.error("Unable to update clock via timedatectl or ntpdate.");
+      process.exitCode = 1;
+      return;
+    }
+
+    result = runCommandSync("date", ["-s", networkTime.toISOString()]);
+    if (result.status === 0) {
+      console.log("System clock updated using date.");
+      return;
+    }
+    console.error("Unable to adjust system clock. Ensure timedatectl or ntpdate is installed and try again.");
+    process.exitCode = 1;
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    let result = runCommandSync("sntp", ["-sS", pool]);
+    if (result.status === 0) {
+      console.log(result.stdout.trim() || "System time synchronized via sntp.");
+      return;
+    }
+
+    let networkTime;
+    try {
+      networkTime = await fetchNetworkTime(source);
+    } catch (error) {
+      console.error(error.message);
+      console.error("Unable to update clock via sntp.");
+      process.exitCode = 1;
+      return;
+    }
+
+    const dateArg = networkTime.toISOString().replace(/T/, " ").replace(/Z$/, "");
+    result = runCommandSync("date", ["-u", dateArg]);
+    if (result.status === 0) {
+      console.log("System clock updated using date.");
+      return;
+    }
+    console.error("Unable to adjust system clock. Ensure sntp is installed and try again.");
+    process.exitCode = 1;
+    return;
+  }
+
+  console.error(`Automatic time sync is not implemented for platform: ${process.platform}`);
+  process.exitCode = 1;
+}
+
+function writeCaptchaToken(token, type = "visa") {
   const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
   const existing = existsSync(captchaPath)
     ? JSON.parse(readFileSync(captchaPath, "utf8"))
     : {};
+  existing[type] = token;
   existing.captchaToken = token;
+  existing.entityId = existing.entityId || process.env.ACTIVE_ENTITY_ID || readEntityId();
+  existing.updatedAt = new Date().toISOString();
   writePrivateJson(captchaPath, existing);
 }
 
@@ -190,7 +441,14 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
     writeAuthToken(token, entityId);
   }
   if (captcha) {
-    writePrivateJson(captchaPath, { captchaToken: captcha });
+    const existingCaptcha = existsSync(captchaPath)
+      ? JSON.parse(readFileSync(captchaPath, "utf8"))
+      : {};
+    existingCaptcha[type] = captcha;
+    existingCaptcha.captchaToken = captcha;
+    existingCaptcha.entityId = existingCaptcha.entityId || entityId;
+    existingCaptcha.updatedAt = new Date().toISOString();
+    writePrivateJson(captchaPath, existingCaptcha);
   }
 
   const capturedEntity = context.entity || {};
@@ -206,22 +464,6 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
       entityTypeId: capturedEntity.entityTypeId || capturedEntity.activeEntityTypeId || existingEntity.entityTypeId,
       systemUserId: context.systemUserId || worker.systemUserId,
     });
-  }
-
-  const creds = findCreds();
-  if (creds && (token || captcha)) {
-    const data = JSON.parse(readFileSync(creds, "utf8"));
-    if (token) {
-      data.response = data.response || {};
-      data.response.data = data.response.data || {};
-      data.response.data.authInfo = {
-        ...(data.response.data.authInfo || {}),
-        userToken: token,
-      };
-    }
-    if (captcha) data.captchaToken = captcha;
-    writePrivateJson(creds, data);
-    if (!quiet) console.log(`  merged into ${creds}`);
   }
 
   return { token, captcha, authPath, captchaPath, entityPath, entityId, context };
@@ -286,9 +528,9 @@ async function cmdPull(args) {
   if (!token && !captcha) process.exitCode = 1;
 }
 
-async function autoPull() {
+async function autoPull(type = "visa") {
   try {
-    const result = await pullCreds({ type: "visa", quiet: true });
+    const result = await pullCreds({ type, quiet: true });
     if (result.token || result.captcha) {
       const files = [result.token && result.authPath, result.captcha && result.captchaPath]
         .filter(Boolean)
@@ -351,37 +593,36 @@ async function cmdBench(args) {
 }
 
 async function cmdReq(args) {
-  const dataIdx = args.indexOf("--data");
-  const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
-  const useCaptcha = args.includes("--captcha");
+  const { payload: initialPayload, captchaType, useCaptcha } = parsePayloadOptions(args, { defaultCaptchaType: "visa" });
   const rawJson = args.includes("--raw-json");
+  const dataIdx = args.indexOf("--data");
+  const captchaTypeIndex = args.indexOf("--captcha-type");
   const clean = args.filter((value, index) =>
     value !== "--captcha" &&
     value !== "--raw-json" &&
+    value !== "--captcha-type" &&
     value !== "--data" &&
-    (dataIdx === -1 || index !== dataIdx + 1)
+    (dataIdx === -1 || index !== dataIdx + 1) &&
+    (captchaTypeIndex === -1 || index !== captchaTypeIndex + 1)
   );
   const path = clean[0];
-  const method = (clean[1] || (dataStr !== null ? "POST" : "GET")).toUpperCase();
+  const method = (clean[1] || (initialPayload !== undefined ? "POST" : "GET")).toUpperCase();
   if (!path) {
-    console.error("Usage: nusuk request <path> [method] [--data <json>] [--captcha]");
+    console.error("Usage: nusuk request <path> [method] [--data <json>] [--captcha] [--captcha-type <type>]");
     process.exit(1);
   }
 
-  let payload = undefined;
-  if (dataStr !== null) {
-    try { payload = JSON.parse(dataStr); }
-    catch { payload = dataStr; }
-  } else if (["POST", "PUT", "PATCH"].includes(method)) {
+  let payload = initialPayload;
+  if (payload === undefined && ["POST", "PUT", "PATCH"].includes(method)) {
     payload = {};
   }
   if (useCaptcha) {
-    const token = readCaptchaToken();
+    const token = readCaptchaToken(captchaType);
     if (!token) console.error("Warning: captcha.json not found or empty");
-    else payload = { ...(payload || {}), captchaToken: token };
+    payload = injectCaptchaToken(payload, token);
   }
 
-  const res = await executeRequest({ path, method, payload, useCaptcha });
+  const res = await executeRequest({ path, method, payload, useCaptcha, captchaType });
   if (rawJson) {
     if (res.json === null) {
       console.error(JSON.stringify({
@@ -402,10 +643,10 @@ async function cmdReq(args) {
   else console.log(`body:`, res.body);
 }
 
-async function executeRequest({ path, method = "GET", payload, useCaptcha = false }) {
+async function executeRequest({ path, method = "GET", payload, useCaptcha = false, captchaType = "visa" }) {
   let authPath = findAuth();
   if (!authPath || (useCaptcha && !payload?.captchaToken)) {
-    const pulled = await autoPull();
+    const pulled = await autoPull(captchaType);
     authPath = authPath || (pulled.token ? pulled.authPath : null);
     if (useCaptcha && !payload?.captchaToken && pulled.captcha) {
       payload = { ...(payload || {}), captchaToken: pulled.captcha };
@@ -502,27 +743,50 @@ async function selectGroup() {
 }
 
 async function cmdCaptchaSet(args = []) {
-  const tokenIndex = args.indexOf("--token");
-  let token = args.find((arg) => !arg.startsWith("-"))
-    || (tokenIndex !== -1 ? args[tokenIndex + 1] : "")
-    || process.env.CAPTCHA_TOKEN
-    || "";
+  const getArg = (flag) => {
+    const index = args.indexOf(flag);
+    return index !== -1 ? args[index + 1] : undefined;
+  };
+  const type = getArg("--type") || "visa";
+  let token = getArg("--token");
+  if (!token) {
+    token = args.find((arg, index) => {
+      if (arg.startsWith("-")) return false;
+      return arg !== type || args[args.indexOf("--type") + 1] !== arg;
+    });
+  }
+  token = token || process.env.CAPTCHA_TOKEN || "";
   if (!token) token = await ask("CAPTCHA token: ") || "";
   if (!token) {
     throw new Error("CAPTCHA token is required. Pass a token, use --token, or set CAPTCHA_TOKEN");
   }
-  writeCaptchaToken(token);
-  console.log("CAPTCHA token updated");
+  writeCaptchaToken(token, normalizeCaptchaType(type));
+  console.log(`CAPTCHA token updated (${normalizeCaptchaType(type)})`);
 }
 
 async function cmdCaptchaShow() {
   const captchaPath = findCaptcha();
   if (!captchaPath) {
-    console.log("captcha file not found (tried creds.json, captcha.json)");
+    console.log("captcha file not found (tried captcha.json)");
     return;
   }
   const data = JSON.parse(readFileSync(captchaPath, "utf8"));
-  console.log(data.captchaToken || "(empty)");
+  const hasVisa = typeof data.visa === "string" && data.visa;
+  const hasLogin = typeof data.login === "string" && data.login;
+  const hasGeneral = typeof data.general === "string" && data.general;
+  const typedCount = [hasVisa, hasLogin, hasGeneral].filter(Boolean).length;
+
+  if (typedCount > 1) {
+    console.log(JSON.stringify({
+      visa: data.visa || null,
+      login: data.login || null,
+      general: data.general || null,
+    }, null, 2));
+  } else if (typedCount === 1) {
+    console.log(data.visa || data.login || data.general);
+  } else {
+    console.log(data.captchaToken || "(empty)");
+  }
 }
 
 async function cmdCaptchaSolve(args) {
@@ -530,13 +794,15 @@ async function cmdCaptchaSolve(args) {
   const solver = new CapSolver();
   console.log(`Solving reCAPTCHA v${version} via CapSolver (${solver.pageUrl})...`);
   const start = Date.now();
+  const type = args.includes("--type") ? args[args.indexOf("--type") + 1] : "visa";
   const token = await solver.solve({
     version,
     onStatus: (res) =>
       console.log(`  status: ${res.status || "unknown"} (${((Date.now() - start) / 1000).toFixed(1)}s)`),
   });
-  writeCaptchaToken(token);
-  console.log(`\n  captchaToken saved (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+  const normalizedType = normalizeCaptchaType(type);
+  writeCaptchaToken(token, normalizedType);
+  console.log(`\n  captcha token saved (${normalizedType}, ${((Date.now() - start) / 1000).toFixed(1)}s)`);
   console.log(`  token: ${token.slice(0, 28)}...`);
 }
 
@@ -702,30 +968,23 @@ async function calibrate(nusuk, count, label) {
 
 async function cmdSchedule(args) {
   const targetIdx = args.indexOf("--target");
-  const targetStr = targetIdx !== -1 ? args[targetIdx + 1] : null;
+  const scheduleIdx = args.indexOf("--schedule");
+  const targetStr = targetIdx !== -1 ? args[targetIdx + 1] : scheduleIdx !== -1 ? args[scheduleIdx + 1] : null;
   const pathIdx = args.indexOf("--path");
   const path = pathIdx !== -1 ? args[pathIdx + 1] : "/umrah/groups_apis/api/Groups/SendToIssueVisa";
   const methodIdx = args.indexOf("--method");
   const method = methodIdx !== -1 ? args[methodIdx + 1].toUpperCase() : "POST";
   const countIdx = args.indexOf("--count");
   const count = parsePositiveCount(countIdx !== -1 ? args[countIdx + 1] : undefined);
-  const dataIdx = args.indexOf("--data");
-  const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
-  let payload = undefined;
-  if (dataStr !== null) {
-    try { payload = JSON.parse(dataStr); }
-    catch { payload = dataStr; }
-  }
-
-  const useCaptcha = args.includes("--captcha");
+  let { payload, captchaType, useCaptcha } = parsePayloadOptions(args, { defaultCaptchaType: "visa" });
   if (useCaptcha) {
-    const token = readCaptchaToken();
+    const token = readCaptchaToken(captchaType);
     if (!token) console.error("Warning: captcha.json not found or empty");
-    else payload = { ...(payload || {}), captchaToken: token };
+    payload = injectCaptchaToken(payload, token);
   }
 
   if (!targetStr) {
-    console.error("Usage: nusuk schedule --target HH:MM:SS [--path /api/endpoint] [--count 5]");
+    console.error("Usage: nusuk schedule --target HH:MM:SS [--path /api/endpoint] [--count 5] [--captcha] [--captcha-type <type>]");
     process.exit(1);
   }
   if (count === null) {
@@ -739,13 +998,18 @@ async function cmdSchedule(args) {
 
   let authPath = findAuth();
   if (!authPath || (useCaptcha && !payload?.captchaToken)) {
-    const pulled = await autoPull();
+    const pulled = await autoPull(captchaType);
     authPath = authPath || (pulled.token ? pulled.authPath : null);
     if (useCaptcha && !payload?.captchaToken && pulled.captcha) {
-      payload = { ...(payload || {}), captchaToken: pulled.captcha };
+      payload = injectCaptchaToken(payload, pulled.captcha);
     }
   }
-  const nusuk = authPath ? new Nusuk().loadAuth(authPath).loadEntity() : new Nusuk().loadEntity();
+  if (!authPath) {
+    console.error("No auth token found. Run `nusuk pull` first or check auth.json");
+    process.exitCode = 1;
+    return;
+  }
+  const nusuk = new Nusuk().loadAuth(authPath).loadEntity();
   await nusuk.init();
 
   try {
@@ -856,11 +1120,16 @@ async function refreshVisaCaptcha(entityId, endpoint) {
 }
 
 async function cmdSendVisa(args) {
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(`Usage: nusuk send-visa <group-id> [--target HH:MM:SS|--schedule HH:MM:SS] [--data '{"key":"value"}'] [--captcha] [--captcha-type <type>] [--no-test] [--endpoint <url>] [--test-path <path>]`);
+    return;
+  }
+
   const getArg = (flag) => {
     const i = args.indexOf(flag);
     return i !== -1 ? args[i + 1] : undefined;
   };
-  const valueFlags = new Set(["--target", "--test-path", "--endpoint"]);
+  const valueFlags = new Set(["--target", "--schedule", "--test-path", "--endpoint", "--data", "--captcha-type", "--no-test", "schedule"]);
   let groupId;
   for (let i = 0; i < args.length; i++) {
     if (valueFlags.has(args[i])) {
@@ -870,10 +1139,11 @@ async function cmdSendVisa(args) {
       break;
     }
   }
-  const targetStr = getArg("--target");
+  const targetStr = getArg("--target") || getArg("--schedule") || (args.includes("schedule") ? args[args.indexOf("schedule") + 1] : undefined);
   const target = targetStr ? parseTargetTime(targetStr) : null;
   const testPath = getArg("--test-path");
   const endpoint = getArg("--endpoint");
+  const { payload: dataPayload, captchaType, useCaptcha } = parsePayloadOptions(args, { defaultCaptchaType: "visa" });
 
   if (!groupId) {
     const selected = await selectGroup();
@@ -938,6 +1208,13 @@ async function cmdSendVisa(args) {
       console.log(`  token OK (${status})`);
     }
 
+    let payload = dataPayload;
+    if (useCaptcha) {
+      const token = readCaptchaToken(captchaType);
+      if (!token) console.error("Warning: captcha.json not found or empty");
+      payload = injectCaptchaToken(payload, token);
+    }
+
     const sendAt = target ? target.getTime() : Date.now();
     const refreshAt = sendAt - CAPTCHA_REFRESH_AHEAD;
     const firstWait = refreshAt - Date.now();
@@ -957,9 +1234,9 @@ async function cmdSendVisa(args) {
       console.warn(`  captcha refresh failed: ${e.message}`);
     }
     if (!captcha) {
-      captcha = readCaptchaToken();
+      captcha = readCaptchaToken(captchaType);
       if (captcha) {
-        console.warn("  worker has no new visa captcha — reusing captcha.json");
+        console.warn("  worker has no new captcha — reusing captcha.json");
       } else {
         console.error("  no captcha available (worker or captcha.json) — aborting");
         process.exitCode = 1;
@@ -973,9 +1250,10 @@ async function cmdSendVisa(args) {
       await new Promise((r) => setTimeout(r, secondWait));
     }
 
-    const payload = {
-      id: normalizeGroupId(groupId),
-      captchaToken: readCaptchaToken() || captcha,
+    payload = {
+      ...(payload || {}),
+      id: String(groupId),
+      captchaToken: payload?.captchaToken || readCaptchaToken(captchaType) || captcha,
     };
     const sendActual = Date.now();
     const res = await nusuk.request(VISA_PATH, { method: "POST", payload });
@@ -1025,6 +1303,7 @@ Usage: nusuk <command> [options]
        nusuk                    Open the guided menu
 
 Common tasks:
+  init                  Create ignored local config files after a fresh clone
   login                 Install the latest user credentials
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
@@ -1033,6 +1312,7 @@ Common tasks:
   api <name>            Run a saved request from the catalog
   groups list           Show group names and IDs
   schedule              Schedule a request
+  sync-time             Sync system clock to accurate network time
   bench [count]         Measure request latency
 
 CAPTCHA:
@@ -1102,8 +1382,12 @@ async function main() {
   const [, , cmd, ...args] = process.argv;
 
   if (!cmd) return guidedMenu();
-  if (args.includes("--help") || args.includes("-h")) {
-    help(cmd === "captcha" ? "captcha" : "");
+  if (cmd === "help" || cmd === "--help" || cmd === "-h") {
+    help(args[0] || "");
+    return;
+  }
+  if (cmd === "captcha" && (args.includes("--help") || args.includes("-h"))) {
+    help("captcha");
     return;
   }
 
@@ -1120,12 +1404,18 @@ async function main() {
     case "groups":
       await cmdGroups(args);
       break;
+    case "init":
+      await cmdInit(args);
+      break;
     case "schedule":
       await cmdSchedule(args);
       break;
     case "send":
     case "send-visa":
       await cmdSendVisa(args);
+      break;
+    case "sync-time":
+      await cmdSyncTime(args);
       break;
     case "captcha-set":
       await cmdCaptchaSet(args);

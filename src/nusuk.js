@@ -19,28 +19,39 @@ export class Nusuk {
     this.page = null;
   }
 
-  loadAuth(path) {
-    const credsPath = process.env.CREDS_PATH || "creds.json";
-    let parsed;
-    try {
-      parsed = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      parsed = null;
-    }
-    if (!parseJwt(parsed?.response?.data?.authInfo?.userToken)) {
+  loadAuth(path = process.env.AUTH_PATH || "auth.json") {
+    const envToken = process.env.AUTH_TOKEN || process.env.NUSUK_AUTH_TOKEN;
+    let parsed = null;
+    let token = envToken ? String(envToken) : null;
+
+    const tryLoad = (filePath) => {
       try {
-        parsed = JSON.parse(readFileSync(credsPath, "utf8"));
+        return JSON.parse(readFileSync(filePath, "utf8"));
       } catch {
-        throw new Error("auth file missing response.data.authInfo.userToken");
+        return null;
+      }
+    };
+
+    if (!token) {
+      parsed = tryLoad(path);
+      const candidate = parsed?.response?.data?.authInfo?.userToken;
+      if (parseJwt(candidate)) {
+        token = candidate;
       }
     }
+
+    if (!token) {
+      throw new Error(
+        `auth file missing response.data.authInfo.userToken; provide a valid auth file at ${path} or set AUTH_TOKEN / NUSUK_AUTH_TOKEN`
+      );
+    }
+
     const authInfo = parsed?.response?.data?.authInfo;
-    const token = requireJwt(authInfo?.userToken, "response.data.authInfo.userToken");
     this.setAuthToken(token);
-    if (parsed?.entityId) {
-      this.setEntityId(parsed.entityId);
-      if (parsed.entityTypeId && !this.entityTypeId) {
-        this.setEntityTypeId(parsed.entityTypeId);
+    if (authInfo?.entityId) {
+      this.setEntityId(authInfo.entityId);
+      if (authInfo.entityTypeId && !this.entityTypeId) {
+        this.setEntityTypeId(authInfo.entityTypeId);
       }
     }
     return this;
@@ -68,25 +79,32 @@ export class Nusuk {
     return this;
   }
 
-  loadCaptcha(path) {
-    const credsPath = process.env.CREDS_PATH || "creds.json";
-    let parsed;
-    try {
-      parsed = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      parsed = null;
-    }
-    if (!parsed?.captchaToken) {
+  loadCaptcha(path = process.env.CAPTCHA_PATH || "captcha.json", type = process.env.CAPTCHA_TYPE || "visa") {
+    const envToken = process.env.CAPTCHA_TOKEN;
+    let parsed = null;
+    let token = envToken ? String(envToken) : null;
+    const normalizedType = String(type || "visa").trim().toLowerCase();
+
+    const tryLoad = (filePath) => {
       try {
-        parsed = JSON.parse(readFileSync(credsPath, "utf8"));
+        return JSON.parse(readFileSync(filePath, "utf8"));
       } catch {
-        throw new Error("captcha file missing captchaToken");
+        return null;
       }
+    };
+
+    parsed = tryLoad(path);
+    if (parsed) {
+      token = token || parsed[normalizedType] || parsed.captchaToken || parsed.visa || parsed.login || parsed.general;
     }
-    if (!parsed?.captchaToken) {
-      throw new Error("captcha file missing captchaToken");
+
+    if (!token) {
+      throw new Error(
+        `captcha file missing captchaToken; provide a valid captcha file at ${path} or set CAPTCHA_TOKEN`
+      );
     }
-    this.captchaToken = parsed.captchaToken;
+
+    this.captchaToken = token;
     return this;
   }
 

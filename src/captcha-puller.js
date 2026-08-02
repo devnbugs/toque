@@ -102,6 +102,7 @@ export async function pullCaptchaOnce({
 
   writePrivateJson(absoluteOutput, {
     ...existing,
+    [normalizedType]: token,
     captchaToken: token,
     captchaType: normalizedType,
     entityId: String(eid),
