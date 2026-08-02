@@ -59,7 +59,7 @@ async function benchmark(nusuk, count = 5) {
   const oneway = netOneWay || Math.round(avg(totals) / 2);
   console.log(`  one-way ~  : ${ms(oneway)}`);
 
-  return { stats, oneway, netOneWay };
+  return { samples, oneway, netOneWay };
 }
 
 async function main() {
@@ -78,7 +78,7 @@ async function main() {
   await nusuk.init();
 
   try {
-    const { stats, oneway, netOneWay } = await benchmark(nusuk, count);
+    const { oneway, netOneWay } = await benchmark(nusuk, count);
 
     if (targetStr) {
       const target = parseTarget(targetStr);

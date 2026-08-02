@@ -265,7 +265,9 @@ async function cmdReq(args) {
   const dataIdx = args.indexOf("--data");
   const dataStr = dataIdx !== -1 ? args[dataIdx + 1] : null;
   const useCaptcha = args.includes("--captcha");
-  const clean = dataIdx !== -1 ? [...args.slice(0, dataIdx), ...args.slice(dataIdx + 2)] : [...args].filter((a) => a !== "--captcha");
+  const clean = args.filter((value, index) =>
+    value !== "--captcha" && value !== "--data" && index !== dataIdx + 1
+  );
   const path = clean[0];
   const method = (clean[1] || (dataStr !== null ? "POST" : "GET")).toUpperCase();
   if (!path) {
@@ -530,6 +532,7 @@ Environment:
   ACTIVE_ENTITY_ID      Override entity id (takes priority over config file)
   ACTIVE_ENTITY_TYPE_ID Override entity type id (takes priority over config file)
   WORKER_URL            autha-worker endpoint for "pull" (default: https://autha-worker.decloud.workers.dev)
+  WORKER_API_TOKEN      Bearer token required by the autha-worker API
 `);
 }
 

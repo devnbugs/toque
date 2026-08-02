@@ -29,6 +29,7 @@ export class AuthaWorker {
       process.env.SYSTEM_USER_ID ||
       this._readEntityFile()?.systemUserId ||
       "default";
+    this.apiToken = config.apiToken || process.env.WORKER_API_TOKEN || "";
   }
 
   _readEntityFile() {
@@ -43,8 +44,14 @@ export class AuthaWorker {
   async _get(path) {
     const sep = path.includes("?") ? "&" : "?";
     const url = `${this.endpoint}${path}${sep}systemUserId=${encodeURIComponent(this.systemUserId)}`;
+    if (!this.apiToken) {
+      throw new Error("WORKER_API_TOKEN is required");
+    }
     const resp = await fetch(url, {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${this.apiToken}`,
+      },
     });
     let json = null;
     try {

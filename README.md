@@ -84,6 +84,8 @@ node reqTook.js [--target HH:MM:SS] # Standalone benchmark/scheduler
 | `ACTIVE_ENTITY_TYPE_ID` | — | Overrides entity type ID |
 | `CAPTCHA_PATH` | `captcha.json` | Path to captcha file (fallback) |
 | `CAPTCHA_TOKEN` | — | Captcha token value for `captcha-set` |
+| `WORKER_URL` | Autha Worker URL | Worker API endpoint used by `pull` |
+| `WORKER_API_TOKEN` | — | Required bearer token for Worker reads |
 
 ## Programmatic API
 
