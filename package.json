@@ -8,7 +8,12 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check bin/nusuk.js && node --check src/*.js && node --check reqTook.js && node --check senReq.js"
+    "check": "node --check bin/nusuk.js && node --check src/*.js && node --check reqTook.js && node --check senReq.js",
+    "container": "node src/server.js",
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "containers:list": "npx wrangler containers list",
+    "containers:images": "npx wrangler containers images list"
   },
   "bin": {
     "nusuk": "./bin/nusuk.js"
@@ -17,8 +22,11 @@
     ".": "./src/nusuk.js"
   },
   "dependencies": {
-    "cloakbrowser": "^0.5.3",
+    "cloakbrowser": "^0.5.5",
     "dotenv": "^17.2.3",
     "playwright-core": "^1.62.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.119.0"
   }
 }

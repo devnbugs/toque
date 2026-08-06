@@ -1,4 +1,11 @@
 sudo apt-get update -qq
+
+# libasound2 package name differs between Ubuntu versions
+ALSA_PKG="libasound2"
+if ! apt-cache show "$ALSA_PKG" >/dev/null 2>&1; then
+  ALSA_PKG="libasound2t64"
+fi
+
 sudo apt-get install -y -qq \
   libatk1.0-0 \
   libatk-bridge2.0-0 \
@@ -15,7 +22,7 @@ sudo apt-get install -y -qq \
   libnspr4 \
   libnss3 \
   libxfixes3 \
-  libasound2t64 \
+  "$ALSA_PKG" \
   libx11-xcb1 \
   libxcb1 \
   libxext6 \

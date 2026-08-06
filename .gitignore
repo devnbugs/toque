@@ -10,3 +10,5 @@ entity.json
 autha-worker/
 .nusuk-captcha.pid
 nusuk-captcha.log
+.wrangler/
+*.log

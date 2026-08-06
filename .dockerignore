@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+auth.json
+captcha.json
+entity.json
+.git
+.github
+*.md
+!README.md
+.nyc_output
+coverage
+.DS_Store
+*.pid
+*.log
