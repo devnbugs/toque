@@ -25,6 +25,9 @@
         "vcpu": 4,
         "memory_mib": 12288,
         "disk_mb": 20000
+      },
+      "ssh": {
+        "enabled": true
       }
     }
   ],
