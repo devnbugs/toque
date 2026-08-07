@@ -101,8 +101,27 @@ curl https://toque.vortex.name.ng/.well-known/oauth-authorization-server
 For scripts that can't use the OAuth flow:
 
 ```bash
+# Set the API key secret (one-time)
 npx wrangler secret put TOQUE_API_KEY
-curl -H "X-API-Key: your-secret-key" https://toque.vortex.name.ng/info
+
+# Use it in requests
+curl -H "X-API-Key: your-secret-key" https://toque.vortex.name.ng/cmd/list
+```
+
+### Quick reference: both auth methods
+
+| Method | Header | Best for |
+|--------|--------|----------|
+| OAuth 2.0 | `Cf-Access-Jwt-Assertion: <token>` | Browser, interactive CLI |
+| API Key | `X-API-Key: <secret>` | Scripts, cron, CI/CD |
+
+```bash
+# OAuth (via cloudflared)
+cloudflared access login https://toque.vortex.name.ng
+cloudflared access curl https://toque.vortex.name.ng/cmd/list
+
+# API Key
+curl -H "X-API-Key: your-secret-key" https://toque.vortex.name.ng/cmd/list
 ```
 
 ### Public endpoints
