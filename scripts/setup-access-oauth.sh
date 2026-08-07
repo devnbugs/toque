@@ -60,47 +60,70 @@ err()  { echo -e "\033[1;31m✗\033[0m $*" >&2; }
 die()  { err "$*"; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Check wrangler auth and get account ID
-# ---------------------------------------------------------------------------
-log "Checking wrangler authentication..."
-WHOAMI_OUT=$(npx wrangler whoami 2>&1)
-
-if echo "$WHOAMI_OUT" | grep -q "not logged in\|You are not logged"; then
-  die "Not logged in to wrangler. Run: npx wrangler login"
-fi
-
-# Extract account ID from wrangler whoami output
-ACCOUNT_ID=$(echo "$WHOAMI_OUT" | grep -oE '[a-f0-9]{32}' | head -1)
-if [ -z "$ACCOUNT_ID" ]; then
-  die "Could not detect account ID from wrangler whoami. Set ACCOUNT_ID manually."
-fi
-ok "Wrangler authenticated (account: $ACCOUNT_ID)"
-
-# ---------------------------------------------------------------------------
-# Resolve the API token to use for Access API calls
+# Resolve the API token and account ID
 # ---------------------------------------------------------------------------
 # Priority: CLOUDFLARE_API_TOKEN env var > wrangler's OAuth token
-# wrangler's OAuth token usually lacks Access permissions, but try it first
-# so users with broader-scoped tokens don't need to set CLOUDFLARE_API_TOKEN.
+# When CLOUDFLARE_API_TOKEN is set, wrangler uses it automatically for all
+# commands (deploy, secret bulk, etc.), so we don't need wrangler login.
+# When it's NOT set, we fall back to wrangler's OAuth login token.
 
-WRANGLER_TOKEN=""
-if [ -f "$HOME/.config/.wrangler/config/default.toml" ]; then
-  WRANGLER_TOKEN=$(grep oauth_token "$HOME/.config/.wrangler/config/default.toml" | head -1 | sed 's/.*= "//;s/"//')
+if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  # Verify the API token and get account ID via the Cloudflare API
+  log "Verifying CLOUDFLARE_API_TOKEN..."
+  TOKEN_VERIFY=$(curl -s "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" 2>&1)
+
+  if ! echo "$TOKEN_VERIFY" | grep -qE '"success":[[:space:]]*true'; then
+    die "CLOUDFLARE_API_TOKEN is invalid or expired. Create a new one at https://dash.cloudflare.com/profile/api-tokens"
+  fi
+  ok "API token is valid"
+
+  # Get account ID from wrangler whoami (using the API token)
+  log "Detecting account ID..."
+  WHOAMI_OUT=$(CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" npx wrangler whoami 2>&1)
+  ACCOUNT_ID=$(echo "$WHOAMI_OUT" | grep -oE '[a-f0-9]{32}' | head -1)
+  if [ -z "$ACCOUNT_ID" ]; then
+    die "Could not detect account ID. The token may lack 'User Details Read' permission. Set ACCOUNT_ID env var manually."
+  fi
+  ok "Account: $ACCOUNT_ID"
+  API_TOKEN="$CLOUDFLARE_API_TOKEN"
+else
+  # No API token set — use wrangler's OAuth login
+  log "Checking wrangler authentication..."
+  WHOAMI_OUT=$(npx wrangler whoami 2>&1)
+
+  if echo "$WHOAMI_OUT" | grep -q "not logged in\|You are not logged"; then
+    die "Not logged in to wrangler. Run: npx wrangler login, or set CLOUDFLARE_API_TOKEN env var."
+  fi
+
+  ACCOUNT_ID=$(echo "$WHOAMI_OUT" | grep -oE '[a-f0-9]{32}' | head -1)
+  if [ -z "$ACCOUNT_ID" ]; then
+    die "Could not detect account ID from wrangler whoami."
+  fi
+  ok "Wrangler authenticated (account: $ACCOUNT_ID)"
+
+  # Try to extract wrangler's OAuth token for Access API calls
+  WRANGLER_TOKEN=""
+  if [ -f "$HOME/.config/.wrangler/config/default.toml" ]; then
+    WRANGLER_TOKEN=$(grep oauth_token "$HOME/.config/.wrangler/config/default.toml" | head -1 | sed 's/.*= "//;s/"//')
+  fi
+  API_TOKEN="$WRANGLER_TOKEN"
 fi
 
-API_TOKEN="${CLOUDFLARE_API_TOKEN:-$WRANGLER_TOKEN}"
 AUTH_HEADER="Authorization: Bearer $API_TOKEN"
 
-# Test which token works for the Access API
+# ---------------------------------------------------------------------------
+# Test Access API permissions (using access/apps, not access/organizations)
+# ---------------------------------------------------------------------------
 log "Testing API token for Access permissions..."
-ACCESS_TEST=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/access/organizations" \
+ACCESS_TEST=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/access/apps" \
   -H "$AUTH_HEADER" 2>&1)
 
-if echo "$ACCESS_TEST" | grep -q '"success":true'; then
+if echo "$ACCESS_TEST" | grep -qE '"success":[[:space:]]*true'; then
   ok "API token has Access permissions"
   HAS_ACCESS=true
 elif [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
-  err "CLOUDFLARE_API_TOKEN does not have Access permissions or is invalid."
+  err "CLOUDFLARE_API_TOKEN does not have Access permissions."
   err "Create a token with 'Access: Apps and Policies Write' at:"
   err "  https://dash.cloudflare.com/profile/api-tokens"
   die "Cannot proceed without Access API permissions."
@@ -121,10 +144,12 @@ TEAM_NAME="${TEAM_NAME:-}"
 
 if [ "$HAS_ACCESS" = true ]; then
   log "Detecting Zero Trust team name..."
-  TEAM_RESPONSE=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/access/organizations" \
-    -H "$AUTH_HEADER")
 
-  if echo "$TEAM_RESPONSE" | grep -q '"success":true'; then
+  # Try access/organizations first (works for some token types)
+  TEAM_RESPONSE=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/access/organizations" \
+    -H "$AUTH_HEADER" 2>&1)
+
+  if echo "$TEAM_RESPONSE" | grep -qE '"success":[[:space:]]*true'; then
     TEAM_NAME=$(echo "$TEAM_RESPONSE" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -143,6 +168,22 @@ if auth_domain and '.cloudflareaccess.com' in auth_domain:
     print(auth_domain.replace('.cloudflareaccess.com', ''))
 else:
     print(auth_domain)
+" 2>/dev/null || echo "")
+    fi
+  fi
+
+  # Fallback: try to get team name from the OAuth discovery endpoint of the
+  # workers.dev subdomain (if the Worker is deployed there)
+  if [ -z "$TEAM_NAME" ]; then
+    log "Trying OAuth discovery endpoint for team name..."
+    OAUTH_META=$(curl -s "https://toque.decloud.workers.dev/.well-known/oauth-authorization-server" 2>&1)
+    if echo "$OAUTH_META" | grep -q 'cloudflareaccess.com'; then
+      TEAM_NAME=$(echo "$OAUTH_META" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+issuer = data.get('issuer', '')
+if '.cloudflareaccess.com' in issuer:
+    print(issuer.replace('https://', '').replace('.cloudflareaccess.com', ''))
 " 2>/dev/null || echo "")
     fi
   fi
@@ -214,7 +255,7 @@ END_JSON
       -H "Content-Type: application/json" \
       -d "$CREATE_BODY")
 
-    if ! echo "$CREATE_RESPONSE" | grep -q '"success":true'; then
+    if ! echo "$CREATE_RESPONSE" | grep -qE '"success":[[:space:]]*true'; then
       err "Failed to create Access application:"
       echo "$CREATE_RESPONSE" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin), indent=2))" 2>/dev/null || echo "$CREATE_RESPONSE"
       die "Access application creation failed."
@@ -229,6 +270,7 @@ END_JSON
 
   OAUTH_BODY=$(cat <<END_JSON
 {
+  "type": "self_hosted",
   "oauth_configuration": {
     "enabled": true,
     "grant": {
@@ -246,7 +288,7 @@ END_JSON
     -H "Content-Type: application/json" \
     -d "$OAUTH_BODY")
 
-  if ! echo "$OAUTH_RESPONSE" | grep -q '"success":true'; then
+  if ! echo "$OAUTH_RESPONSE" | grep -qE '"success":[[:space:]]*true'; then
     err "Warning: Failed to enable Managed OAuth:"
     echo "$OAUTH_RESPONSE" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin), indent=2))" 2>/dev/null || echo "$OAUTH_RESPONSE"
   else
