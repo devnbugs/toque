@@ -1,7 +1,8 @@
-# Toque container image — Node.js + headless browser dependencies
+# Toque container image — Node.js + headless browser dependencies for CloakBrowser
 FROM node:20-slim
 
-# Install system dependencies required by Playwright/Chromium
+# Install system dependencies required by CloakBrowser/Chromium in a single layer.
+# Fonts are required for canvas emoji rendering hashes (anti-bot detection).
 RUN apt-get update && apt-get install -y --no-install-recommends \
   libatk1.0-0 \
   libatk-bridge2.0-0 \
@@ -44,6 +45,10 @@ RUN npm ci --omit=dev
 
 # Copy application code
 COPY . .
+
+# Pre-download the CloakBrowser stealth Chromium binary during build so the
+# first request doesn't pay the download cost (~200MB).
+RUN npx cloakbrowser install || true
 
 # The container exposes an HTTP server on PORT (default 8080)
 ENV PORT=8080

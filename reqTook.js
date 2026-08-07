@@ -1,14 +1,7 @@
 import "dotenv/config";
 import { Nusuk } from "./src/nusuk.js";
 import { parsePositiveCount, parseTargetTime } from "./src/validation.js";
-
-function ms(ms) {
-  return `${ms}ms`;
-}
-
-function formatTime(date) {
-  return date.toTimeString().slice(0, 8) + "." + String(date.getMilliseconds()).padStart(3, "0");
-}
+import { ms, formatTime } from "./src/utils.js";
 
 async function benchmark(nusuk, count = 5) {
   const samples = [];

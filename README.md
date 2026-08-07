@@ -1,6 +1,26 @@
 # toque — Nusuk Request Handler
 
-CLI tool and Node.js module for making authenticated requests to [Masar Nusuk](https://masar.nusuk.sa) APIs via a stealth headless browser (CloakBrowser).
+CLI tool and Node.js module for making authenticated requests to [Masar Nusuk](https://masar.nusuk.sa) APIs via a stealth headless browser ([CloakBrowser](https://github.com/CloakHQ/CloakBrowser) — a source-level patched Chromium that passes bot detection).
+
+## Architecture
+
+```
+┌──────────────┐     ┌─────────────────────┐     ┌──────────────────┐
+│  Cloudflare  │────▶│  Cloudflare Worker   │────▶│  Toque Container  │
+│  Container   │     │  (src/index.js)      │     │  (src/server.js)  │
+│  (headless   │     │  - Workflow mgmt    │     │  - HTTP API       │
+│   browser)   │     │  - Proxy to container│     │  - CLI runner     │
+└──────────────┘     └─────────────────────┘     └──────────────────┘
+                            │                            │
+                            ▼                            ▼
+                     Cloudflare Workflows          Nusuk API
+                     (durable scheduling)          (masar.nusuk.sa)
+```
+
+- **Worker** (`src/index.js`) — public-facing gateway. Handles Workflow management endpoints and proxies everything else to the container.
+- **Container** (`src/server.js`) — runs the headless browser and Nusuk API logic. Exposes JSON endpoints for pull, info, send, schedule, captcha, and CLI commands.
+- **CLI** (`bin/nusuk.js`) — local command-line tool for the same operations.
+- **Workflows** — durable scheduled visa sends that survive container sleep/restart.
 
 ## Install
 
@@ -9,6 +29,41 @@ Requires Node.js 20 or later.
 ```bash
 npm install
 ```
+
+## Deployment
+
+### Prerequisites
+
+- Docker (or Colima) running locally
+- `CLOUDFLARE_API_TOKEN` env var set (or `npx wrangler login`)
+- `WORKER_API_TOKEN` secret set: `npx wrangler secret put WORKER_API_TOKEN`
+- npm dependencies installed (`npm ci`)
+
+### Build & deploy
+
+```bash
+# Full deploy: build container image, push to Cloudflare registry, deploy Worker
+npm run deploy
+
+# Build and push only (no Worker deploy)
+npm run deploy:build-only
+
+# Local dev mode
+npm run deploy:dev
+
+# Roll back to a previous image
+npm run deploy:rollback -- <image-ref>
+
+# Manage running containers
+npm run containers:list
+npm run containers:images
+npm run containers:ssh
+```
+
+The deploy script builds the Docker image, pushes it to Cloudflare's managed
+registry, patches `wrangler.jsonc` with the new image reference, and deploys
+the Worker. The CloakBrowser stealth Chromium binary is pre-downloaded during
+the Docker build so the first request doesn't pay the ~200MB download cost.
 
 ## CLI Usage
 
@@ -255,10 +310,25 @@ Weighted one-way: `(min_ttfb × 0.6 + avg_ttfb × 0.4) ÷ 2`
 
 ```
 ├── bin/nusuk.js        # CLI entry point
+├── src/index.js        # Cloudflare Worker (gateway + Workflows)
+├── src/server.js       # Container HTTP server (JSON API)
 ├── src/nusuk.js        # Nusuk class (programmatic API)
+├── src/worker.js       # AuthaWorker — D1-backed auth/captcha client
+├── src/captcha-puller.js # Background CAPTCHA refresher
 ├── src/capsolver.js    # CapSolver client
+├── src/requests.js     # Named request catalog
+├── src/scheduling.js   # Send-time scheduling logic
+├── src/timing.js       # Request timing helpers
+├── src/validation.js   # Input validation (target time, counts)
+├── src/groups.js       # Group list extraction & formatting
+├── src/visa-payload.js # Visa payload builder
+├── src/jwt.js          # JWT parsing & validation
+├── src/utils.js        # Shared utilities (JSON response, file I/O, formatting)
 ├── senReq.js           # Original entry point
 ├── reqTook.js          # Standalone benchmark/scheduler
+├── Dockerfile          # Container image (Node.js + browser deps)
+├── scripts/deploy.sh   # Build, push, and deploy script
+├── wrangler.jsonc      # Cloudflare Worker/Container config
 ├── entity.json         # Entity configuration
 ├── package.json
 └── .gitignore

@@ -11,13 +11,13 @@
     "check": "node --check bin/nusuk.js && node --check src/*.js && node --check reqTook.js && node --check senReq.js",
     "container": "node src/server.js",
     "dev": "npx wrangler dev",
-    "deploy": "npx wrangler deploy",
-    "deploy:local": "./scripts/deploy.sh",
+    "deploy": "./scripts/deploy.sh",
     "deploy:dev": "./scripts/deploy.sh --dev",
     "deploy:build-only": "./scripts/deploy.sh --build-only",
     "deploy:rollback": "./scripts/deploy.sh --rollback",
     "containers:list": "npx wrangler containers list",
-    "containers:images": "npx wrangler containers images list"
+    "containers:images": "npx wrangler containers images list",
+    "containers:ssh": "npx wrangler containers ssh"
   },
   "bin": {
     "nusuk": "./bin/nusuk.js"
@@ -33,5 +33,12 @@
   },
   "devDependencies": {
     "wrangler": "^4.119.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260801.1": true
+  },
+  "overrides": {
+    "undici": "^7.29.0"
   }
 }

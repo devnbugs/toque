@@ -1,14 +1,11 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
-import { basename, dirname, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { resolve } from "path";
 import { AuthaWorker } from "./worker.js";
+import { writePrivateJson } from "./utils.js";
+
+// Re-export for backward compatibility — the CLI and other modules import
+// writePrivateJson from here. The canonical implementation lives in utils.js.
+export { writePrivateJson };
 
 export const CAPTCHA_TYPES = Object.freeze(["visa", "login", "general"]);
 
@@ -32,26 +29,6 @@ export function parseInterval(value, defaultValue = 5000) {
     throw new Error("Interval must be between 1 second and 1 hour");
   }
   return interval;
-}
-
-export function writePrivateJson(path, data) {
-  const absolutePath = resolve(path);
-  mkdirSync(dirname(absolutePath), { recursive: true, mode: 0o700 });
-  const temporaryPath = resolve(
-    dirname(absolutePath),
-    `.${basename(absolutePath)}.${process.pid}.${Date.now()}.tmp`
-  );
-  try {
-    writeFileSync(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, {
-      mode: 0o600,
-      flag: "wx",
-    });
-    renameSync(temporaryPath, absolutePath);
-    chmodSync(absolutePath, 0o600);
-  } catch (error) {
-    try { unlinkSync(temporaryPath); } catch {}
-    throw error;
-  }
 }
 
 export function readPidFile(path) {

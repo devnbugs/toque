@@ -1,10 +1,10 @@
 /**
  * HTTP server entry point for the Cloudflare Container.
  *
- * Exposes the Nusuk CLI operations as JSON endpoints so a Cloudflare Worker
- * can route requests to the container. The container is stateless: auth,
- * entity, and captcha values are read from environment variables or request
- * bodies, not from local files.
+ * Exposes the Nusuk CLI operations as JSON endpoints so the Cloudflare Worker
+ * can route requests to the container. The container persists auth, entity,
+ * and captcha values to local files (auth.json, captcha.json, entity.json)
+ * so subsequent commands auto-read them without env vars.
  */
 
 import { createServer } from "http";
@@ -20,22 +20,22 @@ import { extractGroups, formatGroups, normalizeGroupId } from "./groups.js";
 import { computeSendSchedule } from "./scheduling.js";
 import { parsePositiveCount, parseTargetTime } from "./validation.js";
 import { pullCaptchaOnce, runCaptchaPullLoop, normalizeCaptchaType, parseInterval } from "./captcha-puller.js";
+import { jsonResponse, writePrivateJson, readJsonIfExists } from "./utils.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..");
 const CLI_PATH = resolve(PROJECT_ROOT, "bin/nusuk.js");
 
-function jsonResponse(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body, null, 2));
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function readBody(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolvePromise, reject) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolvePromise(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -107,6 +107,10 @@ async function withNusuk(body, callback) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pull handler — persists pulled context to local files
+// ---------------------------------------------------------------------------
+
 async function handlePull(body) {
   requireEnv(["WORKER_URL", "WORKER_API_TOKEN"]);
   const worker = new AuthaWorker({
@@ -117,10 +121,6 @@ async function handlePull(body) {
   });
   const context = await worker.fetchContext(undefined, { refresh: Boolean(body.refresh) });
 
-  // Persist the pulled context to local files so subsequent commands
-  // (info, send, schedule, etc.) auto-read auth/captcha/entity without
-  // needing ACTIVE_ENTITY_ID or SYSTEM_USER_ID env vars.
-  const { writeFileSync, existsSync, readFileSync } = await import("fs");
   const authPath = process.env.AUTH_PATH || "auth.json";
   const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
   const entityPath = process.env.ENTITY_CONFIG_PATH || "entity.json";
@@ -135,33 +135,33 @@ async function handlePull(body) {
     null;
 
   if (token) {
-    const existingAuth = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : {};
+    const existingAuth = readJsonIfExists(authPath, {});
     existingAuth.response = existingAuth.response || { data: { authInfo: {} } };
     existingAuth.response.data = existingAuth.response.data || { authInfo: {} };
     existingAuth.response.data.authInfo = existingAuth.response.data.authInfo || {};
     existingAuth.response.data.authInfo.userToken = token;
     if (entityId) existingAuth.response.data.authInfo.entityId = entityId;
-    writeFileSync(authPath, JSON.stringify(existingAuth, null, 2));
+    writePrivateJson(authPath, existingAuth);
   }
 
   if (captcha) {
-    const existingCaptcha = existsSync(captchaPath) ? JSON.parse(readFileSync(captchaPath, "utf8")) : {};
+    const existingCaptcha = readJsonIfExists(captchaPath, {});
     existingCaptcha.visa = captcha;
     existingCaptcha.captchaToken = captcha;
     existingCaptcha.entityId = existingCaptcha.entityId || entityId;
     existingCaptcha.updatedAt = new Date().toISOString();
-    writeFileSync(captchaPath, JSON.stringify(existingCaptcha, null, 2));
+    writePrivateJson(captchaPath, existingCaptcha);
   }
 
   if (entityId || context.systemUserId) {
-    const existingEntity = existsSync(entityPath) ? JSON.parse(readFileSync(entityPath, "utf8")) : {};
+    const existingEntity = readJsonIfExists(entityPath, {});
     const capturedEntity = context.entity || {};
     existingEntity.activeEntityId = capturedEntity.activeEntityId || capturedEntity.entityId || entityId;
     existingEntity.activeEntityTypeId = capturedEntity.activeEntityTypeId || existingEntity.activeEntityTypeId;
     existingEntity.entityId = capturedEntity.entityId || entityId;
     existingEntity.entityTypeId = capturedEntity.entityTypeId || existingEntity.entityTypeId;
     existingEntity.systemUserId = context.systemUserId || worker.systemUserId;
-    writeFileSync(entityPath, JSON.stringify(existingEntity, null, 2));
+    writePrivateJson(entityPath, existingEntity);
   }
 
   return {
@@ -176,6 +176,10 @@ async function handlePull(body) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Nusuk-backed handlers
+// ---------------------------------------------------------------------------
+
 async function handleInfo(body) {
   return withNusuk(body, async (nusuk) => {
     const res = await nusuk.request(
@@ -188,9 +192,7 @@ async function handleInfo(body) {
 
 async function handleSend(body) {
   const groupId = normalizeGroupId(body.groupId);
-  if (!groupId) {
-    throw new Error("groupId is required");
-  }
+  if (!groupId) throw new Error("groupId is required");
   return withNusuk(body, async (nusuk) => {
     const payload = buildVisaPayload(body.payload, groupId, nusuk.captchaToken);
     const res = await nusuk.request(
@@ -204,9 +206,7 @@ async function handleSend(body) {
 async function handleApi(body) {
   const name = String(body.name || "").trim().toLowerCase();
   const request = getRequest(name);
-  if (!request) {
-    throw new Error(`Unknown API request: ${body.name}`);
-  }
+  if (!request) throw new Error(`Unknown API request: ${body.name}`);
   return withNusuk(body, async (nusuk) => {
     const payload = request.captcha
       ? { ...request.payload, captchaToken: nusuk.captchaToken }
@@ -297,50 +297,22 @@ async function handleSchedule(body) {
   });
 }
 
-/**
- * Handle a schedule request that delegates to the Cloudflare Workflow.
- *
- * Instead of blocking with setTimeout inside the container (which is lost
- * if the container sleeps or restarts), this returns immediately with a
- * workflow instance ID. The Workflow runs in the Worker runtime and
- * durably sleeps until the target time, then calls /send on the container.
- *
- * The container's /schedule/workflow endpoint is NOT called directly by
- * clients — the Worker's /schedule/workflow route creates the Workflow
- * instance. This handler exists for internal container-to-container calls
- * and for environments where the container is accessed directly.
- */
-async function handleScheduleWorkflow(body) {
-  // This is a fallback for direct container access. Normally the Worker
-  // creates the Workflow instance via env.VISA_SCHEDULE_WORKFLOW.create().
-  // When called directly on the container, we fall back to setTimeout.
-  return handleSchedule(body);
-}
-
 async function handleListApis() {
   return { ok: true, requests: listRequests() };
 }
 
 // ---------------------------------------------------------------------------
-// Unified /cmd endpoint — run any CLI command and return structured output
+// In-process background CAPTCHA refresher
 // ---------------------------------------------------------------------------
 
-/**
- * In-process background CAPTCHA refresher.
- *
- * Instead of spawning a detached daemon (which is unsafe in a container and
- * impossible to control over HTTP), we run the pull loop in-process with an
- * AbortController. This lets /cmd/captcha-start, /cmd/captcha-status, and
- * /cmd/captcha-stop manage it cleanly.
- */
 const captchaTask = {
-  controller: null,   // AbortController | null
-  startedAt: null,    // Date | null
-  options: null,      // last-used pull options
-  pulls: 0,           // number of successful pulls
-  errors: 0,          // number of failed pulls
-  lastResult: null,   // last pull result
-  lastError: null,    // last error message
+  controller: null,
+  startedAt: null,
+  options: null,
+  pulls: 0,
+  errors: 0,
+  lastResult: null,
+  lastError: null,
 };
 
 function captchaTaskStatus() {
@@ -358,22 +330,15 @@ function captchaTaskStatus() {
 }
 
 function captchaTaskStop() {
-  if (captchaTask.controller) {
-    captchaTask.controller.abort();
-  }
+  if (captchaTask.controller) captchaTask.controller.abort();
   return captchaTaskStatus();
 }
 
 async function captchaTaskStart(options = {}) {
-  // Stop any existing task first
-  if (captchaTask.controller) {
-    captchaTask.controller.abort();
-  }
+  if (captchaTask.controller) captchaTask.controller.abort();
 
   const entityId = options.entityId || process.env.ACTIVE_ENTITY_ID;
-  if (!entityId) {
-    throw new Error("Entity ID required (pass --entity or set ACTIVE_ENTITY_ID)");
-  }
+  if (!entityId) throw new Error("Entity ID required (pass --entity or set ACTIVE_ENTITY_ID)");
 
   const type = normalizeCaptchaType(options.type || "visa");
   const interval = parseInterval(options.interval, 5000);
@@ -390,7 +355,6 @@ async function captchaTaskStart(options = {}) {
   captchaTask.lastResult = null;
   captchaTask.lastError = null;
 
-  // Run the loop in the background (not awaited — fire and forget)
   runCaptchaPullLoop({
     entityId,
     type,
@@ -414,19 +378,13 @@ async function captchaTaskStart(options = {}) {
   return captchaTaskStatus();
 }
 
-/**
- * Run a bounded captcha watch — pulls in a loop for a limited duration,
- * then stops. Returns the collected results. Safe for HTTP.
- */
 async function captchaWatchBounded(options = {}) {
   const entityId = options.entityId || process.env.ACTIVE_ENTITY_ID;
-  if (!entityId) {
-    throw new Error("Entity ID required (pass --entity or set ACTIVE_ENTITY_ID)");
-  }
+  if (!entityId) throw new Error("Entity ID required (pass --entity or set ACTIVE_ENTITY_ID)");
 
   const type = normalizeCaptchaType(options.type || "visa");
   const interval = parseInterval(options.interval, 5000);
-  const maxDuration = Math.min(Number(options.maxDuration) || 60_000, 300_000); // cap at 5 min
+  const maxDuration = Math.min(Number(options.maxDuration) || 60_000, 300_000);
   const endpoint = options.endpoint || process.env.WORKER_URL;
   const outputPath = options.output || process.env.CAPTCHA_PATH || "captcha.json";
   const strict = options.strict !== false;
@@ -452,58 +410,78 @@ async function captchaWatchBounded(options = {}) {
     clearTimeout(timeout);
   }
 
+  return { ok: true, durationMs: Date.now() - startedAt, pulls: results.length, results };
+}
+
+// ---------------------------------------------------------------------------
+// Unified /cmd endpoint — run any CLI command and return structured output
+// ---------------------------------------------------------------------------
+
+const CMD_CATALOG = {
+  init:             { args: [],                          description: "Create local config files" },
+  login:            { args: ["--system-user", "--type", "--endpoint"], description: "Install latest user credentials" },
+  logout:           { args: [],                          description: "Clear local auth/captcha/entity state" },
+  pull:             { args: ["--entity", "--type", "--endpoint"], description: "Refresh auth, entity, and CAPTCHA" },
+  info:             { args: [],                          description: "Show dashboard company info" },
+  send:             { args: ["--target", "--data", "--captcha", "--captcha-type", "--no-test", "--endpoint"], description: "Send a visa request" },
+  "send-visa":      { args: ["--target", "--data", "--captcha", "--captcha-type", "--no-test", "--endpoint"], description: "Send a visa request (alias)" },
+  "set-group-id":   { args: [],                          description: "Store a default group ID" },
+  request:          { args: ["--data", "--data-raw", "--captcha", "--captcha-type", "--raw-json"], description: "Send a custom API request" },
+  api:              { args: ["--raw-json"],               description: "Run a saved request from the catalog" },
+  groups:           { args: ["--limit", "--offset", "--raw-json"], description: "List groups" },
+  schedule:         { args: ["--target", "--path", "--method", "--count", "--data", "--captcha", "--captcha-type"], description: "Schedule a timed request" },
+  workflow:         { args: ["status", "terminate"],      description: "Manage Cloudflare Workflow instances" },
+  "sync-time":      { args: ["--dry-run", "--source"],   description: "Sync system clock to network time" },
+  bench:            { args: [],                          description: "Measure request latency" },
+  "captcha-pull":   { args: ["--entity", "--type", "--endpoint", "--output", "--quiet"], description: "Pull one CAPTCHA" },
+  "captcha-set":    { args: ["--type", "--token"],       description: "Save a CAPTCHA token" },
+  "captcha-show":   { args: [],                          description: "Show the saved token" },
+  "captcha-solve":  { args: ["--v3", "--type"],          description: "Solve CAPTCHA via CapSolver" },
+  "captcha-watch":  { args: ["--entity", "--type", "--interval", "--max-duration", "--endpoint", "--output"], description: "Watch CAPTCHA for a bounded duration (in-process)" },
+  "captcha-start":  { args: ["--entity", "--type", "--interval", "--endpoint", "--output"], description: "Start in-process background CAPTCHA refresher" },
+  "captcha-status": { args: [],                          description: "Show background refresher status" },
+  "captcha-stop":   { args: [],                          description: "Stop the background refresher" },
+  help:             { args: [],                          description: "Show CLI help" },
+};
+
+function parseCmdRequest(body) {
+  if (Array.isArray(body.argv)) return body.argv.map(String);
+  if (body.command) {
+    const cmd = String(body.command).trim();
+    const args = Array.isArray(body.args) ? body.args.map(String) : [];
+    return [cmd, ...args];
+  }
+  return null;
+}
+
+function getArg(argv, flag) {
+  const i = argv.indexOf(flag);
+  return i !== -1 ? argv[i + 1] : undefined;
+}
+
+function parseCaptchaWatchArgs(argv, body = {}) {
   return {
-    ok: true,
-    durationMs: Date.now() - startedAt,
-    pulls: results.length,
-    results,
+    entityId: getArg(argv, "--entity") || body.entityId || process.env.ACTIVE_ENTITY_ID,
+    type: getArg(argv, "--type") || body.type || "visa",
+    interval: getArg(argv, "--interval") || body.interval || "5s",
+    maxDuration: getArg(argv, "--max-duration") || body.maxDuration || 60_000,
+    endpoint: getArg(argv, "--endpoint") || body.endpoint || process.env.WORKER_URL,
+    output: getArg(argv, "--output") || body.output || process.env.CAPTCHA_PATH || "captcha.json",
+    strict: body.strict !== false,
   };
 }
 
-/**
- * Catalog of all CLI commands exposed via /cmd.
- * Each entry maps a command name to its allowed args and description.
- */
-const CMD_CATALOG = {
-  init:           { args: [],                          description: "Create local config files" },
-  login:          { args: ["--system-user", "--type", "--endpoint"], description: "Install latest user credentials" },
-  logout:         { args: [],                          description: "Clear local auth/captcha/entity state" },
-  pull:           { args: ["--entity", "--type", "--endpoint"], description: "Refresh auth, entity, and CAPTCHA" },
-  info:           { args: [],                          description: "Show dashboard company info" },
-  send:           { args: ["--target", "--data", "--captcha", "--captcha-type", "--no-test", "--endpoint"], description: "Send a visa request" },
-  "send-visa":    { args: ["--target", "--data", "--captcha", "--captcha-type", "--no-test", "--endpoint"], description: "Send a visa request (alias)" },
-  "set-group-id": { args: [],                          description: "Store a default group ID" },
-  request:        { args: ["--data", "--data-raw", "--captcha", "--captcha-type", "--raw-json"], description: "Send a custom API request" },
-  api:            { args: ["--raw-json"],               description: "Run a saved request from the catalog" },
-  groups:         { args: ["--limit", "--offset", "--raw-json"], description: "List groups" },
-  schedule:       { args: ["--target", "--path", "--method", "--count", "--data", "--captcha", "--captcha-type"], description: "Schedule a timed request" },
-  workflow:       { args: ["status", "terminate"],            description: "Manage Cloudflare Workflow instances" },
-  "sync-time":    { args: ["--dry-run", "--source"],   description: "Sync system clock to network time" },
-  bench:          { args: [],                          description: "Measure request latency" },
-  "captcha-pull": { args: ["--entity", "--type", "--endpoint", "--output", "--quiet"], description: "Pull one CAPTCHA" },
-  "captcha-set":  { args: ["--type", "--token"],       description: "Save a CAPTCHA token" },
-  "captcha-show": { args: [],                          description: "Show the saved token" },
-  "captcha-solve":{ args: ["--v3", "--type"],          description: "Solve CAPTCHA via CapSolver" },
-  "captcha-watch":{ args: ["--entity", "--type", "--interval", "--max-duration", "--endpoint", "--output"], description: "Watch CAPTCHA for a bounded duration (in-process)" },
-  "captcha-start":{ args: ["--entity", "--type", "--interval", "--endpoint", "--output"], description: "Start in-process background CAPTCHA refresher" },
-  "captcha-status":{ args: [],                         description: "Show background refresher status" },
-  "captcha-stop": { args: [],                          description: "Stop the background refresher" },
-  help:           { args: [],                          description: "Show CLI help" },
-};
+function parseCaptchaStartArgs(argv, body = {}) {
+  return {
+    entityId: getArg(argv, "--entity") || body.entityId || process.env.ACTIVE_ENTITY_ID,
+    type: getArg(argv, "--type") || body.type || "visa",
+    interval: getArg(argv, "--interval") || body.interval || "5s",
+    endpoint: getArg(argv, "--endpoint") || body.endpoint || process.env.WORKER_URL,
+    output: getArg(argv, "--output") || body.output || process.env.CAPTCHA_PATH || "captcha.json",
+    strict: body.strict !== false,
+  };
+}
 
-// Commands that are blocked from subprocess execution (handled in-process instead)
-const CMD_BLOCKED = new Set([
-  // All captcha commands are now handled in-process — none blocked
-]);
-
-/**
- * Execute a CLI command as a subprocess and capture stdout/stderr/exit code.
- * @param {string[]} argv - command args (e.g. ["info"] or ["send", "12345"])
- * @param {object} options
- * @param {number} options.timeout - max execution time in ms (default: 30000)
- * @param {string} options.cwd - working directory (default: project root)
- * @returns {Promise<{ok: boolean, exitCode: number, stdout: string, stderr: string, command: string}>}
- */
 function runCliCommand(argv, options = {}) {
   const timeout = options.timeout ?? 30_000;
   const cwd = options.cwd ?? PROJECT_ROOT;
@@ -553,25 +531,6 @@ function runCliCommand(argv, options = {}) {
   });
 }
 
-/**
- * Parse the /cmd request body into CLI argv.
- * Supports two shapes:
- *   { "command": "info" }
- *   { "command": "send", "args": ["12345", "--no-test"] }
- *   { "argv": ["info"] }
- */
-function parseCmdRequest(body) {
-  if (Array.isArray(body.argv)) {
-    return body.argv.map(String);
-  }
-  if (body.command) {
-    const cmd = String(body.command).trim();
-    const args = Array.isArray(body.args) ? body.args.map(String) : [];
-    return [cmd, ...args];
-  }
-  return null;
-}
-
 async function handleCmd(body) {
   const argv = parseCmdRequest(body);
   if (!argv || argv.length === 0) {
@@ -579,51 +538,32 @@ async function handleCmd(body) {
   }
 
   const cmdStr = argv.join(" ");
-
-  // Block dangerous commands
-  for (const blocked of CMD_BLOCKED) {
-    if (cmdStr.startsWith(blocked)) {
-      throw new Error(`Command "${blocked}" is blocked over HTTP (long-running). Use the CLI directly.`);
-    }
-  }
-
-  // Validate command exists in catalog
   const baseCmd = argv[0];
   if (!CMD_CATALOG[baseCmd]) {
     const available = Object.keys(CMD_CATALOG).join(", ");
     throw new Error(`Unknown command: "${baseCmd}". Available: ${available}`);
   }
 
-  // --- In-process handlers for long-running captcha commands ---
-  // These bypass the subprocess and run natively in the server, making them
-  // safe and controllable over HTTP.
+  // --- In-process handlers for captcha commands (safe over HTTP) ---
   if (baseCmd === "captcha-watch") {
     const opts = parseCaptchaWatchArgs(argv.slice(1), body);
     const result = await captchaWatchBounded(opts);
     return { ok: true, command: cmdStr, ...result };
   }
-
   if (baseCmd === "captcha-start") {
     const opts = parseCaptchaStartArgs(argv.slice(1), body);
     const status = await captchaTaskStart(opts);
     return { ok: true, command: cmdStr, status };
   }
-
   if (baseCmd === "captcha-status") {
     return { ok: true, command: cmdStr, status: captchaTaskStatus() };
   }
-
   if (baseCmd === "captcha-stop") {
-    const status = captchaTaskStop();
-    return { ok: true, command: cmdStr, status };
+    return { ok: true, command: cmdStr, status: captchaTaskStop() };
   }
 
-  const timeout = Number(body.timeout) || 30_000;
-  // Cap timeout at 5 minutes for safety
-  const cappedTimeout = Math.min(timeout, 300_000);
-
-  const result = await runCliCommand(argv, { timeout: cappedTimeout });
-
+  const timeout = Math.min(Number(body.timeout) || 30_000, 300_000);
+  const result = await runCliCommand(argv, { timeout });
   return {
     ok: result.ok,
     command: result.command,
@@ -634,245 +574,128 @@ async function handleCmd(body) {
   };
 }
 
-/**
- * Parse argv for `captcha-watch` into options for captchaWatchBounded.
- * Supports both CLI-style flags (--entity 123) and body fields.
- */
-function parseCaptchaWatchArgs(argv, body = {}) {
-  const getArg = (flag) => {
-    const i = argv.indexOf(flag);
-    return i !== -1 ? argv[i + 1] : undefined;
-  };
-  return {
-    entityId: getArg("--entity") || body.entityId || process.env.ACTIVE_ENTITY_ID,
-    type: getArg("--type") || body.type || "visa",
-    interval: getArg("--interval") || body.interval || "5s",
-    maxDuration: getArg("--max-duration") || body.maxDuration || 60_000,
-    endpoint: getArg("--endpoint") || body.endpoint || process.env.WORKER_URL,
-    output: getArg("--output") || body.output || process.env.CAPTCHA_PATH || "captcha.json",
-    strict: body.strict !== false,
-  };
-}
-
-/**
- * Parse argv for `captcha-start` into options for captchaTaskStart.
- */
-function parseCaptchaStartArgs(argv, body = {}) {
-  const getArg = (flag) => {
-    const i = argv.indexOf(flag);
-    return i !== -1 ? argv[i + 1] : undefined;
-  };
-  return {
-    entityId: getArg("--entity") || body.entityId || process.env.ACTIVE_ENTITY_ID,
-    type: getArg("--type") || body.type || "visa",
-    interval: getArg("--interval") || body.interval || "5s",
-    endpoint: getArg("--endpoint") || body.endpoint || process.env.WORKER_URL,
-    output: getArg("--output") || body.output || process.env.CAPTCHA_PATH || "captcha.json",
-    strict: body.strict !== false,
-  };
-}
-
 async function handleCmdList() {
   const commands = Object.entries(CMD_CATALOG).map(([name, info]) => ({
     name,
     description: info.description,
     allowedArgs: info.args,
   }));
-  return { ok: true, commands, blocked: [...CMD_BLOCKED] };
+  return { ok: true, commands, blocked: [] };
 }
 
-/**
- * Full API documentation — all endpoints, methods, usage, and examples.
- * Exposed via GET /help and GET / on the container.
- */
+// ---------------------------------------------------------------------------
+// API documentation
+// ---------------------------------------------------------------------------
+
 const API_DOCS = [
+  { method: "GET", path: "/help", description: "Show this API documentation", auth: false },
+  { method: "GET", path: "/", description: "Health check — returns service name and status", auth: false },
+  { method: "GET", path: "/health", description: "Health check — returns { ok: true }", auth: false },
   {
-    method: "GET",
-    path: "/help",
-    description: "Show this API documentation with all endpoints, usage, and examples",
-    auth: false,
-  },
-  {
-    method: "GET",
-    path: "/",
-    description: "Health check — returns service name and status",
-    auth: false,
-    example: "curl https://toque.decloud.workers.dev/",
-  },
-  {
-    method: "GET",
-    path: "/health",
-    description: "Health check — returns { ok: true }",
-    auth: false,
-  },
-  {
-    method: "POST",
-    path: "/pull",
-    description: "Pull fresh auth, captcha, and entity context from the autha-worker. Saves to auth.json, captcha.json, entity.json inside the container so subsequent commands auto-read them.",
+    method: "POST", path: "/pull",
+    description: "Pull fresh auth, captcha, and entity context from the autha-worker. Saves to auth.json, captcha.json, entity.json.",
     auth: "WORKER_API_TOKEN",
-    body: {
-      activeEntityId: "string (optional — overrides entity.json)",
-      systemUserId: "string (optional — overrides entity.json)",
-      refresh: "boolean (optional — force refresh, default false)",
-    },
+    body: { activeEntityId: "string (optional)", systemUserId: "string (optional)", refresh: "boolean (optional, default false)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/pull -H "Content-Type: application/json" -d \'{"refresh": true}\'',
-    response: {
-      ok: true,
-      context: "{ ... auth, captcha, entity data from worker }",
-      saved: { auth: true, captcha: true, entityId: "525513", systemUserId: "rhsalisu" },
-    },
+    response: { ok: true, context: "{ ... }", saved: { auth: true, captcha: true, entityId: "525513", systemUserId: "rhsalisu" } },
   },
   {
-    method: "POST",
-    path: "/info",
+    method: "POST", path: "/info",
     description: "Fetch dashboard company info from Nusuk API",
     auth: "auth.json (run /pull first)",
-    body: {
-      authToken: "string (optional — overrides auth.json)",
-      activeEntityId: "string (optional — overrides entity.json)",
-    },
+    body: { authToken: "string (optional)", activeEntityId: "string (optional)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/info -H "Content-Type: application/json" -d \'{}\'',
     response: { ok: true, status: 200, data: "{ ...company info }" },
   },
   {
-    method: "POST",
-    path: "/send",
+    method: "POST", path: "/send",
     description: "Send a visa request for a group",
     auth: "auth.json + captcha.json (run /pull first)",
-    body: {
-      groupId: "string (required — group ID)",
-      payload: "object (optional — custom visa payload)",
-      captchaToken: "string (optional — overrides captcha.json)",
-      captchaType: "string (optional — visa|login|general, default: visa)",
-    },
+    body: { groupId: "string (required)", payload: "object (optional)", captchaToken: "string (optional)", captchaType: "string (optional, default: visa)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/send -H "Content-Type: application/json" -d \'{"groupId": "12345"}\'',
     response: { ok: true, status: 200, data: "{ ...visa response }", timing: "{ total, ttfb }" },
   },
   {
-    method: "POST",
-    path: "/api",
+    method: "POST", path: "/api",
     description: "Run a saved API request from the catalog (see /api-list)",
     auth: "auth.json (run /pull first)",
-    body: {
-      name: "string (required — request name, e.g. 'company-info', 'group-list')",
-      rawJson: "boolean (optional — return raw JSON without parsing)",
-    },
+    body: { name: "string (required)", rawJson: "boolean (optional)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/api -H "Content-Type: application/json" -d \'{"name": "company-info"}\'',
     response: { ok: true, status: 200, data: "{ ...API response }", timing: "{ total, ttfb }" },
   },
   {
-    method: "GET",
-    path: "/api-list",
+    method: "GET", path: "/api-list",
     description: "List all saved API requests in the catalog",
     auth: false,
     example: "curl https://toque.decloud.workers.dev/api-list",
-    response: { ok: true, requests: "[{ name, path, method, captcha, payload }] " },
+    response: { ok: true, requests: "[{ name, path, method, captcha, payload }]" },
   },
   {
-    method: "POST",
-    path: "/request",
+    method: "POST", path: "/request",
     description: "Send a custom API request to any Nusuk endpoint path",
     auth: "auth.json (run /pull first)",
-    body: {
-      path: "string (required — API path, e.g. '/umrah/groups_apis/api/Groups/GetGroupList')",
-      method: "string (optional — GET|POST|PUT|DELETE, default: GET)",
-      payload: "object (optional — request body)",
-      headers: "object (optional — extra headers)",
-    },
+    body: { path: "string (required)", method: "string (optional, default: GET)", payload: "object (optional)", headers: "object (optional)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/request -H "Content-Type: application/json" -d \'{"path": "/umrah/reports_apis/api/Dashboard/DashboardCompanyInfo", "method": "POST", "payload": {}}\'',
     response: { ok: true, status: 200, data: "{ ...response }", timing: "{ total, ttfb }" },
   },
   {
-    method: "POST",
-    path: "/groups",
+    method: "POST", path: "/groups",
     description: "List groups with pagination",
     auth: "auth.json (run /pull first)",
-    body: {
-      limit: "number (optional — default 10)",
-      offset: "number (optional — default 0)",
-      raw: "boolean (optional — return raw JSON)",
-    },
+    body: { limit: "number (optional, default 10)", offset: "number (optional, default 0)", raw: "boolean (optional)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/groups -H "Content-Type: application/json" -d \'{"limit": 10}\'',
     response: { ok: true, status: 200, groups: "[{ id, name }]", raw: "(if raw=true)" },
   },
   {
-    method: "POST",
-    path: "/captcha/solve",
+    method: "POST", path: "/captcha/solve",
     description: "Solve a CAPTCHA via CapSolver",
     auth: "CAPSOLVER_API_KEY env var",
-    body: {
-      siteKey: "string (optional — overrides CAPSOLVER_SITE_KEY)",
-      pageUrl: "string (optional — overrides CAPSOLVER_PAGE_URL)",
-      pageAction: "string (optional — overrides CAPSOLVER_PAGE_ACTION)",
-    },
+    body: { siteKey: "string (optional)", pageUrl: "string (optional)", pageAction: "string (optional)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/captcha/solve -H "Content-Type: application/json" -d \'{}\'',
     response: { ok: true, token: "captcha-token-string" },
   },
   {
-    method: "POST",
-    path: "/schedule",
-    description: "Schedule a timed visa request (blocks until target time, then sends). For durable scheduling use /schedule/workflow instead.",
+    method: "POST", path: "/schedule",
+    description: "Schedule a timed visa request (blocks until target time). For durable scheduling use /schedule/workflow instead.",
     auth: "auth.json + captcha.json (run /pull first)",
-    body: {
-      target: "string (required — HH:MM:SS[.mmm] target time)",
-      groupId: "string (required — group ID)",
-      payload: "object (optional — custom visa payload)",
-      captchaType: "string (optional — visa|login|general, default: visa)",
-    },
+    body: { target: "string (required — HH:MM:SS[.mmm])", groupId: "string (required)", payload: "object (optional)", captchaType: "string (optional, default: visa)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/schedule -H "Content-Type: application/json" -d \'{"target": "21:00:00.500", "groupId": "12345"}\'',
     response: { ok: true, status: 200, data: "{ ...visa response }", scheduledAt: "ISO", firedAt: "ISO" },
   },
   {
-    method: "POST",
-    path: "/schedule/workflow",
-    description: "Create a durable Cloudflare Workflow instance for scheduled visa send. Survives container sleep/restart. Uses step.sleepUntil() + retried step.do().",
+    method: "POST", path: "/schedule/workflow",
+    description: "Create a durable Cloudflare Workflow instance for scheduled visa send. Survives container sleep/restart.",
     auth: "none (runs in Worker runtime)",
-    body: {
-      targetTime: "string (required — ISO string or HH:MM:SS[.mmm] / HH:MM:SS:mmm)",
-      groupId: "string (required — group ID)",
-      captcha: "boolean (optional — default true)",
-      captchaType: "string (optional — visa|login|general, default: visa)",
-      payload: "object (optional — custom visa payload)",
-      pullBefore: "boolean (optional — pull fresh creds before send, default true)",
-    },
+    body: { targetTime: "string (required)", groupId: "string (required)", captcha: "boolean (optional, default true)", captchaType: "string (optional, default: visa)", payload: "object (optional)", pullBefore: "boolean (optional, default true)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/schedule/workflow -H "Content-Type: application/json" -d \'{"targetTime": "21:00:00:000", "groupId": "12345", "captcha": true}\'',
     response: { ok: true, instanceId: "abc-123", targetTime: "ISO", groupId: "12345" },
   },
   {
-    method: "GET",
-    path: "/schedule/workflow/status",
+    method: "GET", path: "/schedule/workflow/status",
     description: "Check the status of a Workflow instance",
     auth: "none",
-    params: { instanceId: "string (required — workflow instance ID)" },
+    params: { instanceId: "string (required)" },
     example: "curl 'https://toque.decloud.workers.dev/schedule/workflow/status?instanceId=abc-123'",
     response: { ok: true, instanceId: "abc-123", status: "{ status, steps, ... }" },
   },
   {
-    method: "POST",
-    path: "/schedule/workflow/terminate",
+    method: "POST", path: "/schedule/workflow/terminate",
     description: "Terminate a running Workflow instance",
     auth: "none",
-    body: { instanceId: "string (required — workflow instance ID)" },
+    body: { instanceId: "string (required)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/schedule/workflow/terminate -H "Content-Type: application/json" -d \'{"instanceId": "abc-123"}\'',
     response: { ok: true, instanceId: "abc-123", terminated: true },
   },
   {
-    method: "POST",
-    path: "/cmd",
+    method: "POST", path: "/cmd",
     description: "Run any CLI command as a subprocess. See /cmd/list for available commands.",
     auth: "varies by command",
-    body: {
-      command: "string (required — command name, e.g. 'info', 'send', 'bench')",
-      args: "string[] (optional — command arguments, e.g. ['15'] for bench)",
-      argv: "string[] (alternative — full argv array, e.g. ['bench', '15'])",
-      timeout: "number (optional — max execution time in ms, default 30000, max 300000)",
-    },
+    body: { command: "string (required)", args: "string[] (optional)", argv: "string[] (alternative)", timeout: "number (optional, default 30000, max 300000)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/cmd -H "Content-Type: application/json" -d \'{"command": "bench", "args": ["15"]}\'',
     response: { ok: true, command: "nusuk bench 15", exitCode: 0, stdout: "...", stderr: "" },
   },
   {
-    method: "GET",
-    path: "/cmd/list",
+    method: "GET", path: "/cmd/list",
     description: "List all available CLI commands exposed via /cmd",
     auth: false,
     example: "curl https://toque.decloud.workers.dev/cmd/list",
@@ -881,13 +704,12 @@ const API_DOCS = [
 ];
 
 function handleHelp() {
-  return {
-    ok: true,
-    service: "toque-container",
-    version: "1.0.0",
-    endpoints: API_DOCS,
-  };
+  return { ok: true, service: "toque-container", version: "1.0.0", endpoints: API_DOCS };
 }
+
+// ---------------------------------------------------------------------------
+// Router & server
+// ---------------------------------------------------------------------------
 
 const ROUTES = {
   "/": handleHelp,
@@ -901,7 +723,7 @@ const ROUTES = {
   "/groups": handleGroups,
   "/captcha/solve": handleCaptchaSolve,
   "/schedule": handleSchedule,
-  "/schedule/workflow": handleScheduleWorkflow,
+  "/schedule/workflow": handleSchedule,
   "/api-list": handleListApis,
   "/cmd": handleCmd,
   "/cmd/list": handleCmdList,
@@ -912,19 +734,19 @@ const server = createServer(async (req, res) => {
   const handler = ROUTES[url.pathname];
 
   if (!handler) {
-    return jsonResponse(res, 404, { ok: false, error: `Unknown route: ${url.pathname}` });
+    return jsonResponse(res, 404, { ok: false, error: `Unknown route: ${url.pathname}` }, req);
   }
 
   if (req.method !== "POST" && req.method !== "GET") {
-    return jsonResponse(res, 405, { ok: false, error: "Method not allowed" });
+    return jsonResponse(res, 405, { ok: false, error: "Method not allowed" }, req);
   }
 
   try {
     const body = req.method === "POST" ? await parseBody(req) : {};
     const result = await handler(body);
-    jsonResponse(res, result.status && !result.ok ? result.status : 200, result);
+    jsonResponse(res, result.status && !result.ok ? result.status : 200, result, req);
   } catch (err) {
-    jsonResponse(res, 500, { ok: false, error: err.message });
+    jsonResponse(res, 500, { ok: false, error: err.message }, req);
   }
 });
 

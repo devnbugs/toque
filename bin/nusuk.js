@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import "dotenv/config";
-import { chmodSync, copyFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { createInterface } from "readline/promises";
 import { stdin as input, stdout as output } from "process";
@@ -15,6 +15,7 @@ import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
 import { computeSendSchedule } from "../src/scheduling.js";
 import { buildVisaPayload } from "../src/visa-payload.js";
 import { summarizeRequestTiming } from "../src/timing.js";
+import { writePrivateJson, ms, formatTime } from "../src/utils.js";
 import {
   isProcessRunning,
   normalizeCaptchaType,
@@ -25,14 +26,6 @@ import {
 } from "../src/captcha-puller.js";
 import { getRequest, listRequests } from "../src/requests.js";
 import { extractGroups, formatGroups, normalizeGroupId, parseGroupSelection } from "../src/groups.js";
-
-function ms(ms) {
-  return `${ms}ms`;
-}
-
-function formatTime(date) {
-  return date.toTimeString().slice(0, 8) + "." + String(date.getMilliseconds()).padStart(3, "0");
-}
 
 function formatCurlPreview(url, headers, payload) {
   const lines = [];
@@ -168,25 +161,6 @@ function injectCaptchaToken(payload, captchaToken) {
         recaptchaToken: payload?.recaptchaToken || captchaToken,
       }
     : payload;
-}
-
-function writePrivateJson(path, data) {
-  const absolutePath = resolve(path);
-  const temporaryPath = resolve(
-    dirname(absolutePath),
-    `.${absolutePath.split("/").pop()}.${process.pid}.${Date.now()}.tmp`
-  );
-  try {
-    writeFileSync(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
-      mode: 0o600,
-      flag: "wx",
-    });
-    renameSync(temporaryPath, absolutePath);
-    chmodSync(absolutePath, 0o600);
-  } catch (error) {
-    try { unlinkSync(temporaryPath); } catch {}
-    throw error;
-  }
 }
 
 function writeAuthToken(token, entityId) {
