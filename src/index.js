@@ -51,6 +51,12 @@ export class ToqueContainer extends Container {
 // the `TOQUE_API_KEY` secret. This keeps the API protected without requiring
 // a browser session for every call.
 //
+// When Cloudflare Access is enabled with Managed OAuth, non-browser clients
+// (CLIs, scripts, AI agents) receive a 401 with a WWW-Authenticate header
+// pointing to the Access OAuth discovery endpoints. The client opens a
+// browser to authenticate, receives an OAuth access token, and presents it
+// as the Cf-Access-Jwt-Assertion header on subsequent requests.
+//
 // Configuration (set via `wrangler secret put` or vars in wrangler.jsonc):
 //   TEAM_DOMAIN   — https://<your-team>.cloudflareaccess.com
 //   POLICY_AUD    — the AUD tag from your Access application
@@ -75,6 +81,37 @@ function getJwks() {
 const PUBLIC_PATHS = new Set(["/health"]);
 
 /**
+ * Build a 401 response with WWW-Authenticate header for Managed OAuth.
+ * When Access is enabled with Managed OAuth, non-browser clients use the
+ * OAuth 2.0 authorization code flow. The WWW-Authenticate header points
+ * them to the discovery endpoint.
+ */
+function unauthorizedResponse(url) {
+  const headers = {};
+  if (env.TEAM_DOMAIN) {
+    // Point non-browser clients to the OAuth discovery endpoint.
+    // Access intercepts this and serves the RFC 8414 metadata.
+    headers["WWW-Authenticate"] = `Bearer realm="toque", error="invalid_token"`;
+  }
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      error: "Authentication required",
+      hint: env.TEAM_DOMAIN
+        ? "Use the OAuth 2.0 authorization code flow via Cloudflare Access, or provide an X-API-Key header."
+        : "Set TEAM_DOMAIN in wrangler config to enable Cloudflare Access auth.",
+    }, null, 2),
+    {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        ...headers,
+      },
+    }
+  );
+}
+
+/**
  * Validate the incoming request against Cloudflare Access or the API key.
  * Returns null on success, or a 401/403 Response on failure.
  */
@@ -85,7 +122,7 @@ async function authenticate(request, url) {
   // Public paths bypass auth (health checks, docs)
   if (PUBLIC_PATHS.has(url.pathname)) return null;
 
-  // 1. Cloudflare Access JWT (browser + programmatic via service token)
+  // 1. Cloudflare Access JWT (browser + OAuth flow + service token)
   const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
   if (accessJwt) {
     try {
@@ -111,14 +148,8 @@ async function authenticate(request, url) {
     }
   }
 
-  // No valid credential found
-  return jsonResponse(401, {
-    ok: false,
-    error: "Authentication required",
-    hint: env.TEAM_DOMAIN
-      ? "Provide a valid Cf-Access-Jwt-Assertion header (Cloudflare Access) or X-API-Key header."
-      : "Set TEAM_DOMAIN in wrangler config to enable Cloudflare Access auth.",
-  });
+  // No valid credential found — return 401 with WWW-Authenticate
+  return unauthorizedResponse(url);
 }
 
 /**
@@ -296,10 +327,11 @@ const API_DOCS = [
     method: "ANY",
     path: "/* (authentication)",
     description:
-      "All endpoints (except /health) require authentication via Cloudflare Access or X-API-Key header. " +
-      "When TEAM_DOMAIN is set, provide a valid Cf-Access-Jwt-Assertion header (from Cloudflare Access) " +
-      "or an X-API-Key header matching the TOQUE_API_KEY secret.",
-    auth: "Cf-Access-Jwt-Assertion OR X-API-Key",
+      "All endpoints (except /health) require authentication via Cloudflare Access (Managed OAuth) or X-API-Key header. " +
+      "When TEAM_DOMAIN is set, non-browser clients receive a 401 with WWW-Authenticate pointing to the OAuth 2.0 " +
+      "discovery endpoint. The client opens a browser to authenticate, receives an access token, and presents it " +
+      "as the Cf-Access-Jwt-Assertion header. Browser requests are handled transparently by Access.",
+    auth: "Cf-Access-Jwt-Assertion (OAuth 2.0 flow) OR X-API-Key",
   },
   {
     method: "GET",

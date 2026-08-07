@@ -32,40 +32,77 @@ npm install
 
 ## Authentication
 
-The Worker supports two authentication methods, both built on Cloudflare's
-Zero Trust / Access platform:
+The Worker uses **Cloudflare Access with Managed OAuth** — Cloudflare's built-in
+OAuth 2.0 authorization server. This lets browser users and non-browser clients
+(CLI tools, scripts, AI agents) authenticate through the same identity provider
+using a standard OAuth flow.
 
-### 1. Cloudflare Access (browser + service tokens)
+### How it works
 
-When `TEAM_DOMAIN` is set, every request must carry a valid
-`Cf-Access-Jwt-Assertion` header — a signed JWT that Cloudflare Access
-injects after the user authenticates. The Worker validates the JWT against
-your team's public keys at `<TEAM_DOMAIN>/cdn-cgi/access/certs`.
+1. **Browser requests** — Cloudflare Access intercepts the request and redirects
+   to your identity provider (Google, GitHub, etc.). After login, Access injects
+   a signed JWT in the `Cf-Access-Jwt-Assertion` header. The Worker validates it
+   against your team's public keys.
 
-**Setup:**
+2. **Non-browser requests** (CLI, scripts) — When Managed OAuth is enabled, the
+   client receives a `401` with a `WWW-Authenticate` header pointing to the OAuth
+   discovery endpoint. The client opens a browser to authenticate, receives an
+   OAuth access token, and presents it as the `Cf-Access-Jwt-Assertion` header.
 
-1. Create a Cloudflare Zero Trust account and note your team name
-2. Create an Access application for the Worker URL
-3. Set the secrets:
+3. **API key fallback** — For fully automated systems (cron jobs, CI/CD), set a
+   `TOQUE_API_KEY` secret and pass it in the `X-API-Key` header.
+
+### Setup
+
+#### Option A: Automated setup script
+
+```bash
+# Create an API token with Access: Apps and Policies Write + Workers Scripts: Edit
+# at https://dash.cloudflare.com/profile/api-tokens
+
+CLOUDFLARE_API_TOKEN=your-token ./scripts/setup-access-oauth.sh
+```
+
+The script will:
+- Create a Cloudflare Access application for the Worker's custom domain
+- Enable Managed OAuth on it
+- Set `TEAM_DOMAIN` and `POLICY_AUD` secrets on the Worker
+
+#### Option B: Manual setup via dashboard
+
+1. Go to **Zero Trust** > **Access controls** > **Applications** > **Add application**
+2. Create a **Self-hosted** application for your Worker domain (e.g. `toque.vortex.name.ng`)
+3. Configure your identity provider (Google, GitHub, etc.)
+4. Go to **Advanced settings** > turn on **Managed OAuth**
+5. Set the Worker secrets:
    ```bash
    npx wrangler secret put TEAM_DOMAIN    # https://<your-team>.cloudflareaccess.com
    npx wrangler secret put POLICY_AUD     # AUD tag from the Access app
    ```
-4. Or set them as vars in `wrangler.jsonc` (non-secret values)
 
-When `TEAM_DOMAIN` is not set, authentication is disabled (open mode).
+### Using the API with OAuth
 
-### 2. API Key (programmatic access)
+After setup, unauthenticated requests return `401` with a `WWW-Authenticate` header:
 
-For scripts and `curl` that can't go through the browser flow, set a shared
-secret and pass it in the `X-API-Key` header:
+```bash
+curl -v https://toque.vortex.name.ng/cmd/list
+# → 401 with WWW-Authenticate: Bearer realm="toque", error="invalid_token"
+```
+
+OAuth clients can discover the authorization endpoints:
+
+```bash
+curl https://toque.vortex.name.ng/.well-known/oauth-authorization-server
+# → RFC 8414 metadata with authorization and token endpoints
+```
+
+### Using the API with an API key
+
+For scripts that can't use the OAuth flow:
 
 ```bash
 npx wrangler secret put TOQUE_API_KEY
-```
-
-```bash
-curl -H "X-API-Key: your-secret-key" https://toque.decloud.workers.dev/info
+curl -H "X-API-Key: your-secret-key" https://toque.vortex.name.ng/info
 ```
 
 ### Public endpoints

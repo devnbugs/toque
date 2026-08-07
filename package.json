@@ -17,7 +17,8 @@
     "deploy:rollback": "./scripts/deploy.sh --rollback",
     "containers:list": "npx wrangler containers list",
     "containers:images": "npx wrangler containers images list",
-    "containers:ssh": "npx wrangler containers ssh"
+    "containers:ssh": "npx wrangler containers ssh",
+    "setup:auth": "./scripts/setup-access-oauth.sh"
   },
   "bin": {
     "nusuk": "./bin/nusuk.js"
