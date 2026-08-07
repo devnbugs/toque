@@ -58,7 +58,32 @@ set_image() {
     const fs = require("fs");
     const path = process.argv[1];
     const raw = fs.readFileSync(path, "utf8");
-    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    // Strip JSONC comments safely — only remove // and /* */ that are NOT
+    // inside string literals. Walk the string char-by-char tracking whether
+    // we are inside a double-quoted string.
+    let inString = false;
+    let escape = false;
+    let stripped = "";
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i];
+      const next = raw[i + 1];
+      if (escape) { stripped += ch; escape = false; continue; }
+      if (ch === "\\" && inString) { stripped += ch; escape = true; continue; }
+      if (ch === "\"") { inString = !inString; stripped += ch; continue; }
+      if (!inString && ch === "/" && next === "/") {
+        // line comment — skip to end of line
+        while (i < raw.length && raw[i] !== "\n") i++;
+        continue;
+      }
+      if (!inString && ch === "/" && next === "*") {
+        // block comment — skip to closing */
+        i += 2;
+        while (i < raw.length - 1 && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+        i++; // skip the */
+        continue;
+      }
+      stripped += ch;
+    }
     const json = JSON.parse(stripped);
     if (!json.containers || !json.containers[0]) throw new Error("No container config in wrangler.jsonc");
     json.containers[0].image = process.argv[2];
