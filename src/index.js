@@ -6,7 +6,7 @@
  * gateway.
  */
 
-import { Container } from "cloudflare:containers";
+import { Container } from "@cloudflare/containers";
 
 export class ToqueContainer extends Container {
   defaultPort = 8080;
