@@ -211,9 +211,12 @@ test("init creates git ignored local config files", () => {
 });
 
 test("schedule parses data and captcha flags without crashing before auth", () => {
-  const result = runWithMissingAuth(["schedule", "--target", "12:00:00", "--data", '{"foo":"bar"}', "--captcha", "--captcha-type", "visa", "--count", "1"]);
+  // Use a target time far in the future so the test is time-of-day independent
+  const future = new Date(Date.now() + 2 * 60 * 60 * 1000);
+  const target = `${String(future.getHours()).padStart(2, "0")}:${String(future.getMinutes()).padStart(2, "0")}:${String(future.getSeconds()).padStart(2, "0")}`;
+  const result = runWithMissingAuth(["schedule", "--target", target, "--data", '{"foo":"bar"}', "--captcha", "--captcha-type", "visa", "--count", "1"]);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Invalid target time/);
+  assert.match(result.stderr, /No auth token found|auth token/i);
 });
 
 test("general help exposes the dedicated company info command", () => {

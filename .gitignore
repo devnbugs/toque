@@ -11,4 +11,5 @@ autha-worker/
 .nusuk-captcha.pid
 nusuk-captcha.log
 .wrangler/
+.last-image
 *.log

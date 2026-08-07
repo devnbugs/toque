@@ -12,6 +12,10 @@
     "container": "node src/server.js",
     "dev": "npx wrangler dev",
     "deploy": "npx wrangler deploy",
+    "deploy:local": "./scripts/deploy.sh",
+    "deploy:dev": "./scripts/deploy.sh --dev",
+    "deploy:build-only": "./scripts/deploy.sh --build-only",
+    "deploy:rollback": "./scripts/deploy.sh --rollback",
     "containers:list": "npx wrangler containers list",
     "containers:images": "npx wrangler containers images list"
   },
