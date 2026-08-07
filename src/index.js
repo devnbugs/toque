@@ -37,9 +37,9 @@ export class ToqueContainer extends Container {
 }
 
 function jsonResponse(status, body) {
-  return new Response(JSON.stringify(body), {
+  return new Response(JSON.stringify(body, null, 2), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json; charset=utf-8" },
   });
 }
 
@@ -122,8 +122,62 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/") {
-      return jsonResponse(200, { ok: true, service: "toque-worker" });
+    // --- Help / API docs (GET / and GET /help) ---
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/help")) {
+      return jsonResponse(200, {
+        ok: true,
+        service: "toque-worker",
+        baseUrl: "https://toque.decloud.workers.dev",
+        endpoints: [
+          {
+            method: "GET",
+            path: "/help",
+            description: "Show this API documentation with all endpoints, usage, and examples",
+          },
+          {
+            method: "GET",
+            path: "/",
+            description: "Alias for /help — shows API documentation",
+          },
+          {
+            method: "POST",
+            path: "/schedule/workflow",
+            description: "Create a durable Cloudflare Workflow instance for scheduled visa send",
+            body: {
+              targetTime: "string (required — ISO string or HH:MM:SS[.mmm] / HH:MM:SS:mmm)",
+              groupId: "string (required — group ID)",
+              captcha: "boolean (optional — default true)",
+              captchaType: "string (optional — visa|login|general, default: visa)",
+              payload: "object (optional — custom visa payload)",
+              pullBefore: "boolean (optional — pull fresh creds before send, default true)",
+            },
+            example: 'curl -X POST https://toque.decloud.workers.dev/schedule/workflow -H "Content-Type: application/json" -d \'{"targetTime": "21:00:00:000", "groupId": "12345", "captcha": true}\'',
+            response: { ok: true, instanceId: "abc-123", targetTime: "ISO", groupId: "12345" },
+          },
+          {
+            method: "GET",
+            path: "/schedule/workflow/status",
+            description: "Check the status of a Workflow instance",
+            params: { instanceId: "string (required — workflow instance ID)" },
+            example: "curl 'https://toque.decloud.workers.dev/schedule/workflow/status?instanceId=abc-123'",
+            response: { ok: true, instanceId: "abc-123", status: "{ status, steps, ... }" },
+          },
+          {
+            method: "POST",
+            path: "/schedule/workflow/terminate",
+            description: "Terminate a running Workflow instance",
+            body: { instanceId: "string (required — workflow instance ID)" },
+            example: 'curl -X POST https://toque.decloud.workers.dev/schedule/workflow/terminate -H "Content-Type: application/json" -d \'{"instanceId": "abc-123"}\'',
+            response: { ok: true, instanceId: "abc-123", terminated: true },
+          },
+          {
+            method: "ANY",
+            path: "/* (all other paths)",
+            description: "All other requests are proxied to the Toque container, which handles: /pull, /info, /send, /api, /request, /groups, /captcha/solve, /schedule, /cmd, /cmd/list, /api-list, /health",
+            note: "See the container's /help endpoint for full docs: curl https://toque.decloud.workers.dev/help",
+          },
+        ],
+      });
     }
 
     // --- Workflow management endpoints ---

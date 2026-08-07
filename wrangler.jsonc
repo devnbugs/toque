@@ -20,7 +20,7 @@
   "containers": [
     {
       "class_name": "ToqueContainer",
-      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:7208a0b",
+      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:7208a0b2",
       "instance_type": {
         "vcpu": 4,
         "memory_mib": 12288,

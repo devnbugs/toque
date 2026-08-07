@@ -27,8 +27,8 @@ const PROJECT_ROOT = resolve(__dirname, "..");
 const CLI_PATH = resolve(PROJECT_ROOT, "bin/nusuk.js");
 
 function jsonResponse(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(body));
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(body, null, 2));
 }
 
 function readBody(req) {
@@ -681,8 +681,217 @@ async function handleCmdList() {
   return { ok: true, commands, blocked: [...CMD_BLOCKED] };
 }
 
+/**
+ * Full API documentation — all endpoints, methods, usage, and examples.
+ * Exposed via GET /help and GET / on the container.
+ */
+const API_DOCS = [
+  {
+    method: "GET",
+    path: "/help",
+    description: "Show this API documentation with all endpoints, usage, and examples",
+    auth: false,
+  },
+  {
+    method: "GET",
+    path: "/",
+    description: "Health check — returns service name and status",
+    auth: false,
+    example: "curl https://toque.decloud.workers.dev/",
+  },
+  {
+    method: "GET",
+    path: "/health",
+    description: "Health check — returns { ok: true }",
+    auth: false,
+  },
+  {
+    method: "POST",
+    path: "/pull",
+    description: "Pull fresh auth, captcha, and entity context from the autha-worker. Saves to auth.json, captcha.json, entity.json inside the container so subsequent commands auto-read them.",
+    auth: "WORKER_API_TOKEN",
+    body: {
+      activeEntityId: "string (optional — overrides entity.json)",
+      systemUserId: "string (optional — overrides entity.json)",
+      refresh: "boolean (optional — force refresh, default false)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/pull -H "Content-Type: application/json" -d \'{"refresh": true}\'',
+    response: {
+      ok: true,
+      context: "{ ... auth, captcha, entity data from worker }",
+      saved: { auth: true, captcha: true, entityId: "525513", systemUserId: "rhsalisu" },
+    },
+  },
+  {
+    method: "POST",
+    path: "/info",
+    description: "Fetch dashboard company info from Nusuk API",
+    auth: "auth.json (run /pull first)",
+    body: {
+      authToken: "string (optional — overrides auth.json)",
+      activeEntityId: "string (optional — overrides entity.json)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/info -H "Content-Type: application/json" -d \'{}\'',
+    response: { ok: true, status: 200, data: "{ ...company info }" },
+  },
+  {
+    method: "POST",
+    path: "/send",
+    description: "Send a visa request for a group",
+    auth: "auth.json + captcha.json (run /pull first)",
+    body: {
+      groupId: "string (required — group ID)",
+      payload: "object (optional — custom visa payload)",
+      captchaToken: "string (optional — overrides captcha.json)",
+      captchaType: "string (optional — visa|login|general, default: visa)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/send -H "Content-Type: application/json" -d \'{"groupId": "12345"}\'',
+    response: { ok: true, status: 200, data: "{ ...visa response }", timing: "{ total, ttfb }" },
+  },
+  {
+    method: "POST",
+    path: "/api",
+    description: "Run a saved API request from the catalog (see /api-list)",
+    auth: "auth.json (run /pull first)",
+    body: {
+      name: "string (required — request name, e.g. 'company-info', 'group-list')",
+      rawJson: "boolean (optional — return raw JSON without parsing)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/api -H "Content-Type: application/json" -d \'{"name": "company-info"}\'',
+    response: { ok: true, status: 200, data: "{ ...API response }", timing: "{ total, ttfb }" },
+  },
+  {
+    method: "GET",
+    path: "/api-list",
+    description: "List all saved API requests in the catalog",
+    auth: false,
+    example: "curl https://toque.decloud.workers.dev/api-list",
+    response: { ok: true, requests: "[{ name, path, method, captcha, payload }] " },
+  },
+  {
+    method: "POST",
+    path: "/request",
+    description: "Send a custom API request to any Nusuk endpoint path",
+    auth: "auth.json (run /pull first)",
+    body: {
+      path: "string (required — API path, e.g. '/umrah/groups_apis/api/Groups/GetGroupList')",
+      method: "string (optional — GET|POST|PUT|DELETE, default: GET)",
+      payload: "object (optional — request body)",
+      headers: "object (optional — extra headers)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/request -H "Content-Type: application/json" -d \'{"path": "/umrah/reports_apis/api/Dashboard/DashboardCompanyInfo", "method": "POST", "payload": {}}\'',
+    response: { ok: true, status: 200, data: "{ ...response }", timing: "{ total, ttfb }" },
+  },
+  {
+    method: "POST",
+    path: "/groups",
+    description: "List groups with pagination",
+    auth: "auth.json (run /pull first)",
+    body: {
+      limit: "number (optional — default 10)",
+      offset: "number (optional — default 0)",
+      raw: "boolean (optional — return raw JSON)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/groups -H "Content-Type: application/json" -d \'{"limit": 10}\'',
+    response: { ok: true, status: 200, groups: "[{ id, name }]", raw: "(if raw=true)" },
+  },
+  {
+    method: "POST",
+    path: "/captcha/solve",
+    description: "Solve a CAPTCHA via CapSolver",
+    auth: "CAPSOLVER_API_KEY env var",
+    body: {
+      siteKey: "string (optional — overrides CAPSOLVER_SITE_KEY)",
+      pageUrl: "string (optional — overrides CAPSOLVER_PAGE_URL)",
+      pageAction: "string (optional — overrides CAPSOLVER_PAGE_ACTION)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/captcha/solve -H "Content-Type: application/json" -d \'{}\'',
+    response: { ok: true, token: "captcha-token-string" },
+  },
+  {
+    method: "POST",
+    path: "/schedule",
+    description: "Schedule a timed visa request (blocks until target time, then sends). For durable scheduling use /schedule/workflow instead.",
+    auth: "auth.json + captcha.json (run /pull first)",
+    body: {
+      target: "string (required — HH:MM:SS[.mmm] target time)",
+      groupId: "string (required — group ID)",
+      payload: "object (optional — custom visa payload)",
+      captchaType: "string (optional — visa|login|general, default: visa)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/schedule -H "Content-Type: application/json" -d \'{"target": "21:00:00.500", "groupId": "12345"}\'',
+    response: { ok: true, status: 200, data: "{ ...visa response }", scheduledAt: "ISO", firedAt: "ISO" },
+  },
+  {
+    method: "POST",
+    path: "/schedule/workflow",
+    description: "Create a durable Cloudflare Workflow instance for scheduled visa send. Survives container sleep/restart. Uses step.sleepUntil() + retried step.do().",
+    auth: "none (runs in Worker runtime)",
+    body: {
+      targetTime: "string (required — ISO string or HH:MM:SS[.mmm] / HH:MM:SS:mmm)",
+      groupId: "string (required — group ID)",
+      captcha: "boolean (optional — default true)",
+      captchaType: "string (optional — visa|login|general, default: visa)",
+      payload: "object (optional — custom visa payload)",
+      pullBefore: "boolean (optional — pull fresh creds before send, default true)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/schedule/workflow -H "Content-Type: application/json" -d \'{"targetTime": "21:00:00:000", "groupId": "12345", "captcha": true}\'',
+    response: { ok: true, instanceId: "abc-123", targetTime: "ISO", groupId: "12345" },
+  },
+  {
+    method: "GET",
+    path: "/schedule/workflow/status",
+    description: "Check the status of a Workflow instance",
+    auth: "none",
+    params: { instanceId: "string (required — workflow instance ID)" },
+    example: "curl 'https://toque.decloud.workers.dev/schedule/workflow/status?instanceId=abc-123'",
+    response: { ok: true, instanceId: "abc-123", status: "{ status, steps, ... }" },
+  },
+  {
+    method: "POST",
+    path: "/schedule/workflow/terminate",
+    description: "Terminate a running Workflow instance",
+    auth: "none",
+    body: { instanceId: "string (required — workflow instance ID)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/schedule/workflow/terminate -H "Content-Type: application/json" -d \'{"instanceId": "abc-123"}\'',
+    response: { ok: true, instanceId: "abc-123", terminated: true },
+  },
+  {
+    method: "POST",
+    path: "/cmd",
+    description: "Run any CLI command as a subprocess. See /cmd/list for available commands.",
+    auth: "varies by command",
+    body: {
+      command: "string (required — command name, e.g. 'info', 'send', 'bench')",
+      args: "string[] (optional — command arguments, e.g. ['15'] for bench)",
+      argv: "string[] (alternative — full argv array, e.g. ['bench', '15'])",
+      timeout: "number (optional — max execution time in ms, default 30000, max 300000)",
+    },
+    example: 'curl -X POST https://toque.decloud.workers.dev/cmd -H "Content-Type: application/json" -d \'{"command": "bench", "args": ["15"]}\'',
+    response: { ok: true, command: "nusuk bench 15", exitCode: 0, stdout: "...", stderr: "" },
+  },
+  {
+    method: "GET",
+    path: "/cmd/list",
+    description: "List all available CLI commands exposed via /cmd",
+    auth: false,
+    example: "curl https://toque.decloud.workers.dev/cmd/list",
+    response: { ok: true, commands: "[{ name, description, allowedArgs }]", blocked: "[]" },
+  },
+];
+
+function handleHelp() {
+  return {
+    ok: true,
+    service: "toque-container",
+    version: "1.0.0",
+    endpoints: API_DOCS,
+  };
+}
+
 const ROUTES = {
-  "/": async () => ({ ok: true, service: "toque-container" }),
+  "/": handleHelp,
+  "/help": handleHelp,
   "/health": async () => ({ ok: true }),
   "/pull": handlePull,
   "/info": handleInfo,
