@@ -8,6 +8,7 @@
 import { Container } from "@cloudflare/containers";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import { env } from "cloudflare:workers";
+import { jwtVerify, createRemoteJWKSet } from "jose";
 import { jsonResponse } from "./utils.js";
 
 export class ToqueContainer extends Container {
@@ -34,6 +35,90 @@ export class ToqueContainer extends Container {
   onError(error) {
     console.error("Toque container error:", error);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare Access authentication
+// ---------------------------------------------------------------------------
+//
+// When Cloudflare Access (Zero Trust) is in front of this Worker, every
+// request carries a signed JWT in the `Cf-Access-Jwt-Assertion` header.
+// We validate it against the team's public keys to prove the request came
+// through Access and not a malicious third party.
+//
+// For programmatic clients (curl, scripts) that can't go through the browser
+// flow, we also accept a bearer token in the `X-API-Key` header that matches
+// the `TOQUE_API_KEY` secret. This keeps the API protected without requiring
+// a browser session for every call.
+//
+// Configuration (set via `wrangler secret put` or vars in wrangler.jsonc):
+//   TEAM_DOMAIN   — https://<your-team>.cloudflareaccess.com
+//   POLICY_AUD    — the AUD tag from your Access application
+//   TOQUE_API_KEY — optional shared secret for X-API-Key header auth
+//
+// When TEAM_DOMAIN is not set, authentication is disabled (open mode, useful
+// for initial setup or when Access is enforced by a Cloudflare Access policy
+// on the route itself).
+
+let jwksCache = null;
+
+function getJwks() {
+  if (!jwksCache && env.TEAM_DOMAIN) {
+    jwksCache = createRemoteJWKSet(
+      new URL(`${env.TEAM_DOMAIN}/cdn-cgi/access/certs`)
+    );
+  }
+  return jwksCache;
+}
+
+/** Paths that never require authentication (health checks, docs). */
+const PUBLIC_PATHS = new Set(["/health"]);
+
+/**
+ * Validate the incoming request against Cloudflare Access or the API key.
+ * Returns null on success, or a 401/403 Response on failure.
+ */
+async function authenticate(request, url) {
+  // Open mode: no TEAM_DOMAIN configured → skip auth entirely
+  if (!env.TEAM_DOMAIN) return null;
+
+  // Public paths bypass auth (health checks, docs)
+  if (PUBLIC_PATHS.has(url.pathname)) return null;
+
+  // 1. Cloudflare Access JWT (browser + programmatic via service token)
+  const accessJwt = request.headers.get("Cf-Access-Jwt-Assertion");
+  if (accessJwt) {
+    try {
+      const jwks = getJwks();
+      const verifyOptions = { issuer: env.TEAM_DOMAIN };
+      if (env.POLICY_AUD) verifyOptions.audience = env.POLICY_AUD;
+      await jwtVerify(accessJwt, jwks, verifyOptions);
+      return null; // valid Access token
+    } catch (err) {
+      return jsonResponse(403, {
+        ok: false,
+        error: "Invalid Cloudflare Access token",
+        detail: err.message,
+      });
+    }
+  }
+
+  // 2. API key fallback (X-API-Key header for scripts/curl)
+  if (env.TOQUE_API_KEY) {
+    const apiKey = request.headers.get("X-API-Key");
+    if (apiKey && apiKey === env.TOQUE_API_KEY) {
+      return null; // valid API key
+    }
+  }
+
+  // No valid credential found
+  return jsonResponse(401, {
+    ok: false,
+    error: "Authentication required",
+    hint: env.TEAM_DOMAIN
+      ? "Provide a valid Cf-Access-Jwt-Assertion header (Cloudflare Access) or X-API-Key header."
+      : "Set TEAM_DOMAIN in wrangler config to enable Cloudflare Access auth.",
+  });
 }
 
 /**
@@ -208,6 +293,15 @@ async function terminateWorkflow(instanceId) {
 
 const API_DOCS = [
   {
+    method: "ANY",
+    path: "/* (authentication)",
+    description:
+      "All endpoints (except /health) require authentication via Cloudflare Access or X-API-Key header. " +
+      "When TEAM_DOMAIN is set, provide a valid Cf-Access-Jwt-Assertion header (from Cloudflare Access) " +
+      "or an X-API-Key header matching the TOQUE_API_KEY secret.",
+    auth: "Cf-Access-Jwt-Assertion OR X-API-Key",
+  },
+  {
     method: "GET",
     path: "/help",
     description: "Show this API documentation with all endpoints, usage, and examples",
@@ -287,6 +381,10 @@ async function handleWorkflowRoutes(url, request) {
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+
+    // --- Authentication (Cloudflare Access / API key) ---
+    const authError = await authenticate(request, url);
+    if (authError) return authError;
 
     // --- Help / API docs (GET / and GET /help) ---
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/help")) {

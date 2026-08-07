@@ -29,6 +29,7 @@
     "@cloudflare/containers": "^0.3.7",
     "cloakbrowser": "^0.5.5",
     "dotenv": "^17.2.3",
+    "jose": "^6.2.8",
     "playwright-core": "^1.62.0"
   },
   "devDependencies": {

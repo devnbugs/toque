@@ -9,7 +9,14 @@
     "head_sampling_rate": 1
   },
   "vars": {
-    "WORKER_URL": "https://autha-worker.decloud.workers.dev"
+    "WORKER_URL": "https://autha-worker.decloud.workers.dev",
+    // Cloudflare Access (Zero Trust) authentication.
+    // Set TEAM_DOMAIN to enable JWT validation of the Cf-Access-Jwt-Assertion header.
+    // Format: https://<your-team-name>.cloudflareaccess.com
+    // Set POLICY_AUD to your Access application's AUD tag.
+    // When TEAM_DOMAIN is unset, auth is disabled (open mode).
+    // "TEAM_DOMAIN": "https://<your-team>.cloudflareaccess.com",
+    // "POLICY_AUD": "<your-access-app-aud-tag>"
   },
   "placement": {
     "mode": "smart"

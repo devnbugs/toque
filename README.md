@@ -30,6 +30,48 @@ Requires Node.js 20 or later.
 npm install
 ```
 
+## Authentication
+
+The Worker supports two authentication methods, both built on Cloudflare's
+Zero Trust / Access platform:
+
+### 1. Cloudflare Access (browser + service tokens)
+
+When `TEAM_DOMAIN` is set, every request must carry a valid
+`Cf-Access-Jwt-Assertion` header — a signed JWT that Cloudflare Access
+injects after the user authenticates. The Worker validates the JWT against
+your team's public keys at `<TEAM_DOMAIN>/cdn-cgi/access/certs`.
+
+**Setup:**
+
+1. Create a Cloudflare Zero Trust account and note your team name
+2. Create an Access application for the Worker URL
+3. Set the secrets:
+   ```bash
+   npx wrangler secret put TEAM_DOMAIN    # https://<your-team>.cloudflareaccess.com
+   npx wrangler secret put POLICY_AUD     # AUD tag from the Access app
+   ```
+4. Or set them as vars in `wrangler.jsonc` (non-secret values)
+
+When `TEAM_DOMAIN` is not set, authentication is disabled (open mode).
+
+### 2. API Key (programmatic access)
+
+For scripts and `curl` that can't go through the browser flow, set a shared
+secret and pass it in the `X-API-Key` header:
+
+```bash
+npx wrangler secret put TOQUE_API_KEY
+```
+
+```bash
+curl -H "X-API-Key: your-secret-key" https://toque.decloud.workers.dev/info
+```
+
+### Public endpoints
+
+`/health` is always public (no auth required) for uptime checks.
+
 ## Deployment
 
 ### Prerequisites
@@ -37,6 +79,7 @@ npm install
 - Docker (or Colima) running locally
 - `CLOUDFLARE_API_TOKEN` env var set (or `npx wrangler login`)
 - `WORKER_API_TOKEN` secret set: `npx wrangler secret put WORKER_API_TOKEN`
+- (Optional) `TEAM_DOMAIN`, `POLICY_AUD`, `TOQUE_API_KEY` secrets for auth
 - npm dependencies installed (`npm ci`)
 
 ### Build & deploy
@@ -228,6 +271,9 @@ Git and loaded automatically by the CLI and standalone scripts.
 | `CAPTCHA_TOKEN` | — | Captcha token value for `captcha-set` |
 | `WORKER_URL` | Autha Worker URL | Worker API endpoint used by `pull` |
 | `WORKER_API_TOKEN` | — | Required bearer token for Worker reads |
+| `TEAM_DOMAIN` | — | Cloudflare Access team domain (e.g. `https://myteam.cloudflareaccess.com`). Set to enable JWT auth. |
+| `POLICY_AUD` | — | Cloudflare Access application AUD tag (required when `TEAM_DOMAIN` is set) |
+| `TOQUE_API_KEY` | — | Shared secret for `X-API-Key` header auth (programmatic access) |
 | `CAPSOLVER_API_KEY` | — | CapSolver API key for `captcha-solve` |
 | `CAPSOLVER_SITE_KEY` | Nusuk key | reCAPTCHA site key used when solving |
 | `CAPSOLVER_PAGE_URL` | Group list | Page URL used when solving |
