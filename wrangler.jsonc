@@ -4,11 +4,28 @@
   "main": "src/index.js",
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "WORKER_URL": "https://autha-worker.decloud.workers.dev"
+  },
+  "secrets": {
+    "required": ["WORKER_API_TOKEN"]
+  },
+  "placement": {
+    "mode": "smart"
+  },
   "containers": [
     {
       "class_name": "ToqueContainer",
-      "image": "./Dockerfile",
-      "max_instances": 5
+      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:7208a0b",
+      "instance_type": {
+        "vcpu": 4,
+        "memory_mib": 12288,
+        "disk_mb": 20000
+      }
     }
   ],
   "durable_objects": {
@@ -19,6 +36,13 @@
       }
     ]
   },
+  "workflows": [
+    {
+      "name": "visa-schedule",
+      "binding": "VISA_SCHEDULE_WORKFLOW",
+      "class_name": "VisaScheduleWorkflow"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",

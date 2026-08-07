@@ -73,6 +73,15 @@ nusuk schedule --target 22:00:00:500 \
 # Schedule with custom payload and captcha
 nusuk schedule --target 22:00:00 --data '{"key":"value"}' --captcha
 
+# Schedule a visa send using Cloudflare Workflows (durable, no blocking)
+nusuk send-visa schedule 21:00:00:000 <group-id> --captcha --workflow
+
+# Check the status of a workflow instance
+nusuk workflow status <instanceId>
+
+# Terminate a workflow instance
+nusuk workflow terminate <instanceId>
+
 # Solve and store a fresh captcha
 CAPSOLVER_API_KEY=... nusuk captcha solve
 
@@ -157,8 +166,9 @@ Git and loaded automatically by the CLI and standalone scripts.
 |---|---|---|
 | `AUTH_PATH` | `auth.json` | Path to auth file |
 | `ENTITY_CONFIG_PATH` | `entity.json` | Path to entity config file |
-| `ACTIVE_ENTITY_ID` | — | Overrides entity ID (takes priority over file) |
+| `ACTIVE_ENTITY_ID` | — | Overrides entity ID (auto-filled by `nusuk login`/`nusuk pull` into `entity.json`) |
 | `ACTIVE_ENTITY_TYPE_ID` | — | Overrides entity type ID |
+| `SYSTEM_USER_ID` | — | System user ID (auto-filled by `nusuk login`/`nusuk pull` into `entity.json`) |
 | `CAPTCHA_PATH` | `captcha.json` | Path to captcha file |
 | `CAPTCHA_TOKEN` | — | Captcha token value for `captcha-set` |
 | `WORKER_URL` | Autha Worker URL | Worker API endpoint used by `pull` |

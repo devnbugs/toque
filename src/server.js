@@ -62,7 +62,16 @@ function buildNusuk(body = {}) {
     baseUrl: body.baseUrl || process.env.NUSUK_BASE_URL,
     origin: body.origin || process.env.NUSUK_ORIGIN,
     referer: body.referer || process.env.NUSUK_REFERER,
-    browserOptions: { headless: true },
+    browserOptions: {
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--single-process",
+      ],
+    },
   });
 
   const authToken = body.authToken || process.env.AUTH_TOKEN || process.env.NUSUK_AUTH_TOKEN;
@@ -99,7 +108,7 @@ async function withNusuk(body, callback) {
 }
 
 async function handlePull(body) {
-  requireEnv(["WORKER_URL", "WORKER_API_TOKEN", "ACTIVE_ENTITY_ID"]);
+  requireEnv(["WORKER_URL", "WORKER_API_TOKEN"]);
   const worker = new AuthaWorker({
     endpoint: process.env.WORKER_URL,
     apiToken: process.env.WORKER_API_TOKEN,
@@ -107,7 +116,64 @@ async function handlePull(body) {
     systemUserId: body.systemUserId || process.env.SYSTEM_USER_ID,
   });
   const context = await worker.fetchContext(undefined, { refresh: Boolean(body.refresh) });
-  return { ok: true, context };
+
+  // Persist the pulled context to local files so subsequent commands
+  // (info, send, schedule, etc.) auto-read auth/captcha/entity without
+  // needing ACTIVE_ENTITY_ID or SYSTEM_USER_ID env vars.
+  const { writeFileSync, existsSync, readFileSync } = await import("fs");
+  const authPath = process.env.AUTH_PATH || "auth.json";
+  const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
+  const entityPath = process.env.ENTITY_CONFIG_PATH || "entity.json";
+
+  const entityId = context.entityId || context.entity?.entityId;
+  const token = worker.extractToken(context.auth);
+  const captchaOptions = context.captcha || {};
+  const captcha =
+    captchaOptions.visa?.captchaToken ||
+    captchaOptions.latest?.captchaToken ||
+    captchaOptions.login?.captchaToken ||
+    null;
+
+  if (token) {
+    const existingAuth = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : {};
+    existingAuth.response = existingAuth.response || { data: { authInfo: {} } };
+    existingAuth.response.data = existingAuth.response.data || { authInfo: {} };
+    existingAuth.response.data.authInfo = existingAuth.response.data.authInfo || {};
+    existingAuth.response.data.authInfo.userToken = token;
+    if (entityId) existingAuth.response.data.authInfo.entityId = entityId;
+    writeFileSync(authPath, JSON.stringify(existingAuth, null, 2));
+  }
+
+  if (captcha) {
+    const existingCaptcha = existsSync(captchaPath) ? JSON.parse(readFileSync(captchaPath, "utf8")) : {};
+    existingCaptcha.visa = captcha;
+    existingCaptcha.captchaToken = captcha;
+    existingCaptcha.entityId = existingCaptcha.entityId || entityId;
+    existingCaptcha.updatedAt = new Date().toISOString();
+    writeFileSync(captchaPath, JSON.stringify(existingCaptcha, null, 2));
+  }
+
+  if (entityId || context.systemUserId) {
+    const existingEntity = existsSync(entityPath) ? JSON.parse(readFileSync(entityPath, "utf8")) : {};
+    const capturedEntity = context.entity || {};
+    existingEntity.activeEntityId = capturedEntity.activeEntityId || capturedEntity.entityId || entityId;
+    existingEntity.activeEntityTypeId = capturedEntity.activeEntityTypeId || existingEntity.activeEntityTypeId;
+    existingEntity.entityId = capturedEntity.entityId || entityId;
+    existingEntity.entityTypeId = capturedEntity.entityTypeId || existingEntity.entityTypeId;
+    existingEntity.systemUserId = context.systemUserId || worker.systemUserId;
+    writeFileSync(entityPath, JSON.stringify(existingEntity, null, 2));
+  }
+
+  return {
+    ok: true,
+    context,
+    saved: {
+      auth: Boolean(token),
+      captcha: Boolean(captcha),
+      entityId: entityId || null,
+      systemUserId: context.systemUserId || worker.systemUserId || null,
+    },
+  };
 }
 
 async function handleInfo(body) {
@@ -229,6 +295,26 @@ async function handleSchedule(body) {
       firedAt: new Date().toISOString(),
     };
   });
+}
+
+/**
+ * Handle a schedule request that delegates to the Cloudflare Workflow.
+ *
+ * Instead of blocking with setTimeout inside the container (which is lost
+ * if the container sleeps or restarts), this returns immediately with a
+ * workflow instance ID. The Workflow runs in the Worker runtime and
+ * durably sleeps until the target time, then calls /send on the container.
+ *
+ * The container's /schedule/workflow endpoint is NOT called directly by
+ * clients — the Worker's /schedule/workflow route creates the Workflow
+ * instance. This handler exists for internal container-to-container calls
+ * and for environments where the container is accessed directly.
+ */
+async function handleScheduleWorkflow(body) {
+  // This is a fallback for direct container access. Normally the Worker
+  // creates the Workflow instance via env.VISA_SCHEDULE_WORKFLOW.create().
+  // When called directly on the container, we fall back to setTimeout.
+  return handleSchedule(body);
 }
 
 async function handleListApis() {
@@ -391,6 +477,7 @@ const CMD_CATALOG = {
   api:            { args: ["--raw-json"],               description: "Run a saved request from the catalog" },
   groups:         { args: ["--limit", "--offset", "--raw-json"], description: "List groups" },
   schedule:       { args: ["--target", "--path", "--method", "--count", "--data", "--captcha", "--captcha-type"], description: "Schedule a timed request" },
+  workflow:       { args: ["status", "terminate"],            description: "Manage Cloudflare Workflow instances" },
   "sync-time":    { args: ["--dry-run", "--source"],   description: "Sync system clock to network time" },
   bench:          { args: [],                          description: "Measure request latency" },
   "captcha-pull": { args: ["--entity", "--type", "--endpoint", "--output", "--quiet"], description: "Pull one CAPTCHA" },
@@ -605,6 +692,7 @@ const ROUTES = {
   "/groups": handleGroups,
   "/captcha/solve": handleCaptchaSolve,
   "/schedule": handleSchedule,
+  "/schedule/workflow": handleScheduleWorkflow,
   "/api-list": handleListApis,
   "/cmd": handleCmd,
   "/cmd/list": handleCmdList,

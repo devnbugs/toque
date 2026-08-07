@@ -78,12 +78,16 @@ do_build_and_push() {
   log "Building and pushing image: $full_tag"
 
   # wrangler containers build -p builds locally and pushes to Cloudflare registry
-  # Output: registry.cloudflare.com/<ACCOUNT_ID>/<IMAGE>:<TAG>
-  local registry_uri
-  registry_uri=$(npx wrangler containers build -p -t "$TAG" . 2>&1 | tee /dev/stderr | grep -oE 'registry\.cloudflare\.com/[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+' | head -n1)
+  # The -t flag takes "name:tag" — the name becomes the registry repo name.
+  # Output: registry.cloudflare.com/<ACCOUNT_ID>/<NAME>:<TAG>
+  npx wrangler containers build -p -t "$full_tag" . 2>&1 | tee /dev/stderr
 
-  if [ -z "$registry_uri" ]; then
-    die "Could not extract registry URI from wrangler output. Check the build log above."
+  local account_id
+  account_id=$(npx wrangler whoami 2>/dev/null | grep -oE '[a-f0-9]{32}' | head -1)
+  local registry_uri="registry.cloudflare.com/${account_id}/${full_tag}"
+
+  if [ -z "$account_id" ]; then
+    die "Could not determine account ID. Check the build log above."
   fi
 
   ok "Image pushed to: $registry_uri"

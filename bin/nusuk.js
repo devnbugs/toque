@@ -610,6 +610,63 @@ async function cmdPull(args) {
   if (!token && !captcha) process.exitCode = 1;
 }
 
+/**
+ * cmdWorkflow — manage Cloudflare Workflow instances for scheduled visa sends.
+ *
+ * Usage:
+ *   nusuk workflow status <instanceId>     Check status of a workflow instance
+ *   nusuk workflow terminate <instanceId>  Terminate a workflow instance
+ */
+async function cmdWorkflow(args) {
+  const sub = args[0] || "";
+  const workerUrl = process.env.WORKER_URL || "https://toque.decloud.workers.dev";
+  const base = workerUrl.replace(/\/+$/, "");
+
+  if (sub === "status") {
+    const instanceId = args[1];
+    if (!instanceId) {
+      console.error("Usage: nusuk workflow status <instanceId>");
+      process.exitCode = 1;
+      return;
+    }
+    const resp = await fetch(`${base}/schedule/workflow/status?instanceId=${encodeURIComponent(instanceId)}`);
+    const json = await resp.json();
+    if (!json.ok) {
+      console.error(`Error: ${json.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(JSON.stringify(json.status, null, 2));
+    return;
+  }
+
+  if (sub === "terminate" || sub === "stop") {
+    const instanceId = args[1];
+    if (!instanceId) {
+      console.error("Usage: nusuk workflow terminate <instanceId>");
+      process.exitCode = 1;
+      return;
+    }
+    const resp = await fetch(`${base}/schedule/workflow/terminate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instanceId }),
+    });
+    const json = await resp.json();
+    if (!json.ok) {
+      console.error(`Error: ${json.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Workflow ${instanceId} terminated.`);
+    return;
+  }
+
+  console.log(`Usage: nusuk workflow <status|terminate> <instanceId>`);
+  console.log(`  status    Check the status of a workflow instance`);
+  console.log(`  terminate Terminate a running workflow instance`);
+}
+
 async function autoPull(type = "visa") {
   try {
     const result = await pullCreds({ type, quiet: true });
@@ -1222,7 +1279,8 @@ async function warmVisaConnection(nusuk, targetTime) {
 
 async function cmdSendVisa(args) {
   if (args.includes("--help") || args.includes("-h")) {
-    console.log(`Usage: nusuk send-visa <group-id> [--target HH:MM:SS|--schedule HH:MM:SS] [--data '{"key":"value"}'] [--captcha] [--captcha-type <type>] [--no-test] [--endpoint <url>] [--test-path <path>]`);
+    console.log(`Usage: nusuk send-visa <group-id> [--target HH:MM:SS|--schedule HH:MM:SS] [--workflow] [--data '{"key":"value"}'] [--captcha] [--captcha-type <type>] [--no-test] [--endpoint <url>] [--test-path <path>]`);
+    console.log(`  --workflow  Create a Cloudflare Workflow instance for durable scheduled execution (no blocking)`);
     return;
   }
 
@@ -1230,6 +1288,7 @@ async function cmdSendVisa(args) {
     const i = args.indexOf(flag);
     return i !== -1 ? args[i + 1] : undefined;
   };
+  const useWorkflow = args.includes("--workflow");
   const valueFlags = new Set(["--target", "--schedule", "--test-path", "--endpoint", "--data", "--captcha-type", "--no-test", "schedule"]);
   let groupId;
   for (let i = 0; i < args.length; i++) {
@@ -1268,6 +1327,49 @@ async function cmdSendVisa(args) {
   if (targetStr && !target) {
     console.error("Invalid target time. Use HH:MM:SS[.mmm] or HH:MM:SS:mmm, and it must be in the future.");
     process.exit(1);
+  }
+
+  // --- Workflow mode: delegate to Cloudflare Workflows for durable execution ---
+  if (useWorkflow && target) {
+    const workerUrl = getArg("--endpoint") || process.env.WORKER_URL || "https://toque.decloud.workers.dev";
+    const workflowEndpoint = `${workerUrl.replace(/\/+$/, "")}/schedule/workflow`;
+    const workflowBody = {
+      targetTime: target.toISOString(),
+      groupId: String(groupId),
+      captcha: useCaptcha,
+      captchaType,
+      payload: dataPayload || null,
+      pullBefore: true,
+    };
+    console.log(`Creating Workflow instance for scheduled send...`);
+    console.log(`  target  : ${formatTime(target)}`);
+    console.log(`  group   : ${groupId}`);
+    console.log(`  endpoint: ${workflowEndpoint}`);
+    try {
+      const resp = await fetch(workflowEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(workflowBody),
+      });
+      const json = await resp.json();
+      if (!json.ok) {
+        console.error(`Failed to create workflow: ${json.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`\n  ✓ Workflow instance created: ${json.instanceId}`);
+      console.log(`  Target time: ${json.targetTime}`);
+      console.log(`  Group ID: ${json.groupId}`);
+      console.log(`\n  Check status:`);
+      console.log(`    nusuk workflow status ${json.instanceId}`);
+      console.log(`  Or via curl:`);
+      console.log(`    curl "${workerUrl.replace(/\/+$/, "")}/schedule/workflow/status?instanceId=${json.instanceId}"`);
+      return;
+    } catch (e) {
+      console.error(`Failed to create workflow: ${e.message}`);
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const entityId = process.env.ACTIVE_ENTITY_ID || readEntityId();
@@ -1463,6 +1565,7 @@ Common tasks:
   api <name>            Run a saved request from the catalog
   groups list           Show group names and IDs
   schedule              Schedule a request
+  workflow              Manage Cloudflare Workflow instances (status, terminate)
   sync-time             Sync system clock to accurate network time
   bench [count]         Measure request latency
 
@@ -1595,6 +1698,9 @@ async function main() {
       break;
     case "login":
       await cmdLogin(args);
+      break;
+    case "workflow":
+      await cmdWorkflow(args);
       break;
     case "help":
       help(args[0] || "");
