@@ -17,6 +17,7 @@ import { CapSolver } from "./capsolver.js";
 import { CapMonsterSolver } from "./capmonster.js";
 import { buildVisaPayload } from "./visa-payload.js";
 import { buildLoginRequest, DEFAULT_TRUSTED_DEVICE_TOKEN } from "./nusuk-crypto.js";
+import { parseJwt } from "./jwt.js";
 import { getRequest, listRequests } from "./requests.js";
 import { extractGroups, formatGroups, normalizeGroupId } from "./groups.js";
 import { computeSendSchedule } from "./scheduling.js";
@@ -345,9 +346,14 @@ async function handleAutoLogin(body = {}) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
-      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      // The login response has entityId=null at the authInfo level, but the
+      // JWT payload carries defaultEntityId/defaultEntityTypeId. Extract them
+      // so loadAuth() can set the activeentityid header for authenticated calls.
+      const jwt = parseJwt(token);
+      const entityId = res.json?.response?.data?.authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
-      existing.response.data.authInfo.entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || existing.response.data.authInfo.entityTypeId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
     }
 
@@ -403,9 +409,13 @@ async function handleVerifyLogin(body = {}) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
-      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      // Extract entity info from the JWT payload (login response has it null
+      // at the authInfo level) so loadAuth() can set the activeentityid header.
+      const jwt = parseJwt(token);
+      const entityId = res.json?.response?.data?.authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
-      existing.response.data.authInfo.entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || existing.response.data.authInfo.entityTypeId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
     }
 
