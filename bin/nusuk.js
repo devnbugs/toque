@@ -670,36 +670,34 @@ async function cmdBench(args) {
     console.log(`Sending ${count} test requests...\n`);
     const samples = [];
     for (let i = 0; i < count; i++) {
-      const res = await nusuk.request("/manifest.json");
+      const res = await nusuk.request("/manifest.json", { cacheBust: true });
       const t = res.timing;
       samples.push(t);
       console.log(`  req ${i + 1}: total=${ms(t.total)}  ttfb=${ms(t.ttfb ?? "?")}  status=${res.status}`);
     }
 
     const totals = samples.map((s) => s.total);
-    const ttfbVals = samples.map((s) => s.ttfb).filter(Boolean);
+    const ttfbVals = samples.map((s) => s.ttfb).filter((v) => v != null && v > 0);
     const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
     const min = (arr) => Math.min(...arr);
-
-    const realTtfb = ttfbVals.filter((v) => v > 2);
-    const minTtfb = realTtfb.length ? min(realTtfb) : (ttfbVals.length ? min(ttfbVals) : null);
-    const avgTtfb = ttfbVals.length ? avg(ttfbVals) : null;
-    const netOneWay = minTtfb ? Math.round(minTtfb / 2) : null;
+    const max = (arr) => Math.max(...arr);
 
     console.log(`\n--- Latency Stats ---`);
-    console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(Math.max(...totals))}`);
+    console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(max(totals))}`);
     if (ttfbVals.length) {
-      const filtered = realTtfb.length < ttfbVals.length ? ` (${realTtfb.length}/${ttfbVals.length} real)` : "";
-      console.log(`  ttfb       : min=${ms(minTtfb)}  avg=${ms(avgTtfb)}  max=${ms(Math.max(...ttfbVals))}${filtered}`);
-      if (realTtfb.length) {
-        console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
-      }
-    }
-    if (netOneWay) {
+      console.log(`  ttfb       : min=${ms(min(ttfbVals))}  avg=${ms(avg(ttfbVals))}  max=${ms(max(ttfbVals))}  (${ttfbVals.length}/${count} samples)`);
+      const minTtfb = min(ttfbVals);
+      const avgTtfb = avg(ttfbVals);
+      console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
+      const netOneWay = Math.round(minTtfb / 2);
       console.log(`  net 1-way  : ${ms(netOneWay)}  (min ttfb ÷ 2)  <-- request delivery`);
+      const oneway = netOneWay || Math.round(avg(totals) / 2);
+      console.log(`  one-way ~  : ${ms(oneway)}`);
+    } else {
+      console.log(`  ttfb       : (no resource timing entries — enable cacheBust or check browser)`);
+      const oneway = Math.round(avg(totals) / 2);
+      console.log(`  one-way ~  : ${ms(oneway)}`);
     }
-    const oneway = netOneWay || Math.round(avg(totals) / 2);
-    console.log(`  one-way ~  : ${ms(oneway)}`);
   } finally {
     await nusuk.close();
   }

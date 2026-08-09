@@ -1,12 +1,14 @@
-# Toque container image — Node.js + headless browser dependencies for CloakBrowser
-FROM node:20-slim
+# Toque container image — Node.js 26 + headless browser deps for CloakBrowser
+# Multi-stage build: deps layer cached separately from app code.
+FROM node:26-slim AS base
 
 # Install system dependencies required by CloakBrowser/Chromium in a single layer.
 # Fonts are required for canvas emoji rendering hashes (anti-bot detection).
+# Uses t64-suffixed packages for Ubuntu 24.04+ (Noble) compatibility.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  libatk1.0-0 \
-  libatk-bridge2.0-0 \
-  libcups2 \
+  libatk1.0-0t64 \
+  libatk-bridge2.0-0t64 \
+  libcups2t64 \
   libdrm2 \
   libdbus-1-3 \
   libxkbcommon0 \
@@ -19,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libnspr4 \
   libnss3 \
   libxfixes3 \
-  libasound2 \
+  libasound2t64 \
   libx11-xcb1 \
   libxcb1 \
   libxext6 \
@@ -35,23 +37,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   fonts-tlwg-loma-otf \
   ca-certificates \
   curl \
+  tini \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Copy dependency manifests first for better layer caching
 COPY package*.json ./
-RUN npm ci --omit=dev
-
-# Copy application code
-COPY . .
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Pre-download the CloakBrowser stealth Chromium binary during build so the
 # first request doesn't pay the download cost (~200MB).
+# CLOAKBROWSER_SUPPRESS_FONT_WARNING silences the incomplete font set notice.
+ENV CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 RUN npx cloakbrowser install || true
+
+# --- App layer ---
+FROM base AS app
+
+WORKDIR /app
+
+# Copy application code (layer cached separately from deps above)
+COPY . .
+
+# Run as a non-root user for security
+RUN groupadd -r toque && useradd -r -g toque -s /bin/bash toque \
+  && chown -R toque:toque /app
+USER toque
 
 # The container exposes an HTTP server on PORT (default 8080)
 ENV PORT=8080
+ENV NODE_ENV=production
 EXPOSE 8080
 
+# Use tini as PID 1 for proper signal handling (graceful shutdown)
+ENTRYPOINT ["tini", "--"]
 CMD ["node", "src/server.js"]

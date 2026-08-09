@@ -112,10 +112,16 @@ async function withNusuk(body, callback) {
 // ---------------------------------------------------------------------------
 
 async function handlePull(body) {
-  requireEnv(["WORKER_URL", "WORKER_API_TOKEN"]);
+  // In proxy mode, AUTHA_PROXY_URL is set and WORKER_API_TOKEN is not needed
+  // (the Worker injects it via the service binding). In direct mode, both
+  // WORKER_URL and WORKER_API_TOKEN are required.
+  const proxyMode = Boolean(process.env.AUTHA_PROXY_URL);
+  if (!proxyMode) {
+    requireEnv(["WORKER_URL", "WORKER_API_TOKEN"]);
+  }
   const worker = new AuthaWorker({
-    endpoint: process.env.WORKER_URL,
-    apiToken: process.env.WORKER_API_TOKEN,
+    endpoint: proxyMode ? undefined : process.env.WORKER_URL,
+    apiToken: proxyMode ? undefined : process.env.WORKER_API_TOKEN,
     entityId: body.activeEntityId || process.env.ACTIVE_ENTITY_ID,
     systemUserId: body.systemUserId || process.env.SYSTEM_USER_ID,
   });
@@ -342,7 +348,9 @@ async function captchaTaskStart(options = {}) {
 
   const type = normalizeCaptchaType(options.type || "visa");
   const interval = parseInterval(options.interval, 5000);
-  const endpoint = options.endpoint || process.env.WORKER_URL;
+  // In proxy mode, don't pass endpoint — AuthaWorker constructor picks up
+  // AUTHA_PROXY_URL automatically.
+  const endpoint = options.endpoint || (process.env.AUTHA_PROXY_URL ? undefined : process.env.WORKER_URL);
   const outputPath = options.output || process.env.CAPTCHA_PATH || "captcha.json";
   const strict = options.strict !== false;
 
@@ -385,7 +393,9 @@ async function captchaWatchBounded(options = {}) {
   const type = normalizeCaptchaType(options.type || "visa");
   const interval = parseInterval(options.interval, 5000);
   const maxDuration = Math.min(Number(options.maxDuration) || 60_000, 300_000);
-  const endpoint = options.endpoint || process.env.WORKER_URL;
+  // In proxy mode, don't pass endpoint — AuthaWorker constructor picks up
+  // AUTHA_PROXY_URL automatically.
+  const endpoint = options.endpoint || (process.env.AUTHA_PROXY_URL ? undefined : process.env.WORKER_URL);
   const outputPath = options.output || process.env.CAPTCHA_PATH || "captcha.json";
   const strict = options.strict !== false;
 

@@ -2,33 +2,48 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "toque",
   "main": "src/index.js",
-  "compatibility_date": "2026-08-06",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "upload_source_maps": true,
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "logs": {
+      "invocation_logs": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    }
   },
   "vars": {
     "WORKER_URL": "https://autha-worker.decloud.workers.dev",
-    // Cloudflare Access (Zero Trust) authentication.
-    // Set TEAM_DOMAIN to enable JWT validation of the Cf-Access-Jwt-Assertion header.
-    // Format: https://<your-team-name>.cloudflareaccess.com
-    // Set POLICY_AUD to your Access application's AUD tag.
-    // When TEAM_DOMAIN is unset, auth is disabled (open mode).
-    // "TEAM_DOMAIN": "https://<your-team>.cloudflareaccess.com",
-    // "POLICY_AUD": "<your-access-app-aud-tag>"
+    "TOQUE_WORKER_URL": "https://toque.decloud.workers.dev"
   },
+  "services": [
+    {
+      "binding": "AUTHA_WORKER",
+      "service": "autha-worker"
+    }
+  ],
   "placement": {
-    "mode": "smart"
+    "mode": "targeted",
+    "region": "aws:us-east-1"
   },
+  "preview_urls": false,
   "containers": [
     {
       "class_name": "ToqueContainer",
-      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:893f638",
-      "instance_type": {
-        "vcpu": 4,
-        "memory_mib": 12288,
-        "disk_mb": 20000
+      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:a5fe378",
+      "instance_type": "standard-4",
+      "max_instances": 1,
+      "constraints": {
+        "regions": [
+          "ENAM",
+          "WNAM"
+        ]
       },
       "ssh": {
         "enabled": true
@@ -36,7 +51,11 @@
       "authorized_keys": [
         {
           "name": "toque-admin",
-          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIARlTfN77R87B9LNNp9l69bW4PuStSxRLgJInzxUB+y6 toque-container-ssh"
+          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJz83jY18H/w0eg5powOZjK8PALdKpckiqOWGtGOsfAp toque-admin"
+        },
+        {
+          "name": "rhsalisu",
+          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJz83jY18H/w0eg5powOZjK8PALdKpckiqOWGtGOsfAp rhsalisu@DeCore"
         }
       ]
     }
@@ -59,7 +78,9 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["ToqueContainer"]
+      "new_sqlite_classes": [
+        "ToqueContainer"
+      ]
     }
   ]
 }
