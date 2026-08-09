@@ -88,11 +88,12 @@ function buildNusuk(body = {}) {
     activeEntityTypeId: body.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID,
   });
 
+  const skipCaptcha = body.skipCaptcha === true;
   const captchaType = body.captchaType || process.env.CAPTCHA_TYPE || "visa";
   const captchaToken = body.captchaToken || process.env.CAPTCHA_TOKEN;
   if (captchaToken) {
     nusuk.captchaToken = captchaToken;
-  } else {
+  } else if (!skipCaptcha) {
     nusuk.loadCaptcha(undefined, captchaType);
   }
 
@@ -323,7 +324,7 @@ async function handleAutoLogin(body = {}) {
     loginHeaders["authorization"] = body.authorization || process.env.LOGIN_AUTH_TOKEN;
   }
 
-  return withNusuk({ ...body, skipAuth: true }, async (nusuk) => {
+  return withNusuk({ ...body, skipAuth: true, skipCaptcha: true }, async (nusuk) => {
     const res = await nusuk.request("/eh/public/authentication/login", {
       method: "POST",
       payload: loginPayload,
