@@ -11,6 +11,7 @@ import { Nusuk } from "../src/nusuk.js";
 import { AuthaWorker } from "../src/worker.js";
 import { parseJwt } from "../src/jwt.js";
 import { CapSolver } from "../src/capsolver.js";
+import { CapMonsterSolver } from "../src/capmonster.js";
 import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
 import { computeSendSchedule } from "../src/scheduling.js";
 import { buildVisaPayload } from "../src/visa-payload.js";
@@ -913,19 +914,64 @@ async function cmdCaptchaShow() {
 
 async function cmdCaptchaSolve(args) {
   const version = args.includes("--v3") ? 3 : 2;
+  const type = args.includes("--type") ? args[args.indexOf("--type") + 1] : "visa";
+  const provider = args.includes("--capmonster") ? "capmonster" : "capsolver";
+  const enterprise = args.includes("--enterprise");
+  const turnstile = args.includes("--turnstile");
+  const normalizedType = normalizeCaptchaType(type);
+  const start = Date.now();
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver();
+    const captchaType = turnstile ? "turnstile" : "recaptcha";
+    console.log(`Solving ${turnstile ? "Turnstile" : `reCAPTCHA v${version}${enterprise ? " Enterprise" : ""}`} via CapMonster Cloud (${solver.pageUrl})...`);
+    const token = await solver.solve({
+      version,
+      type: captchaType,
+      enterprise,
+      timeout: 180000,
+    });
+    writeCaptchaToken(token, normalizedType);
+    console.log(`\n  captcha token saved (${normalizedType}, ${((Date.now() - start) / 1000).toFixed(1)}s)`);
+    console.log(`  token: ${token.slice(0, 28)}...`);
+    return;
+  }
+
+  // Default: CapSolver
   const solver = new CapSolver();
   console.log(`Solving reCAPTCHA v${version} via CapSolver (${solver.pageUrl})...`);
-  const start = Date.now();
-  const type = args.includes("--type") ? args[args.indexOf("--type") + 1] : "visa";
   const token = await solver.solve({
     version,
     onStatus: (res) =>
       console.log(`  status: ${res.status || "unknown"} (${((Date.now() - start) / 1000).toFixed(1)}s)`),
   });
-  const normalizedType = normalizeCaptchaType(type);
   writeCaptchaToken(token, normalizedType);
   console.log(`\n  captcha token saved (${normalizedType}, ${((Date.now() - start) / 1000).toFixed(1)}s)`);
   console.log(`  token: ${token.slice(0, 28)}...`);
+}
+
+async function cmdCaptchaBalance(args) {
+  const provider = args.includes("--capmonster") ? "capmonster" : "capsolver";
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver();
+    console.log("Checking CapMonster Cloud balance...");
+    const { balance } = await solver.getBalance();
+    console.log(`  CapMonster Cloud balance: $${balance}`);
+    return;
+  }
+
+  // CapSolver doesn't have a getBalance method — use the REST API directly
+  const apiKey = process.env.CAPSOLVER_API_KEY;
+  if (!apiKey) throw new Error("CAPSOLVER_API_KEY is required");
+  const res = await fetch("https://api.capsolver.com/getBalance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clientKey: apiKey }),
+  });
+  const json = await res.json();
+  if (json.errorId !== 0) throw new Error(`CapSolver balance error: ${json.errorDescription || json.errorCode}`);
+  console.log(`  CapSolver balance: $${json.balance}`);
 }
 
 function captchaPullOptions(args) {
@@ -1060,8 +1106,9 @@ async function cmdCaptcha(args) {
     case "set": return cmdCaptchaSet(rest);
     case "show": return cmdCaptchaShow();
     case "solve": return cmdCaptchaSolve(rest);
+    case "balance": return cmdCaptchaBalance(rest);
     case "help": help("captcha"); return;
-    default: throw new Error("Usage: nusuk captcha <pull|watch|start|status|stop|set|show|solve>");
+    default: throw new Error("Usage: nusuk captcha <pull|watch|start|status|stop|set|show|solve|balance>");
   }
 }
 
@@ -1506,7 +1553,8 @@ Actions:
   stop                  Stop the background refresher
   set [token]           Save a CAPTCHA token
   show                  Show the saved token
-  solve [--v3]          Solve via CapSolver
+  solve [--v3]          Solve via CapSolver (default) or CapMonster (--capmonster)
+  balance               Check solver account balance (--capmonster for CapMonster)
 
 Options:
   --type <type>         visa, login, or general (default: visa)
@@ -1658,6 +1706,9 @@ async function main() {
       break;
     case "captcha-solve":
       await cmdCaptchaSolve(args);
+      break;
+    case "captcha-balance":
+      await cmdCaptchaBalance(args);
       break;
     case "captcha":
       await cmdCaptcha(args);

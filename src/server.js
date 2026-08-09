@@ -14,6 +14,7 @@ import { dirname, resolve } from "path";
 import { Nusuk } from "./nusuk.js";
 import { AuthaWorker } from "./worker.js";
 import { CapSolver } from "./capsolver.js";
+import { CapMonsterSolver } from "./capmonster.js";
 import { buildVisaPayload } from "./visa-payload.js";
 import { getRequest, listRequests } from "./requests.js";
 import { extractGroups, formatGroups, normalizeGroupId } from "./groups.js";
@@ -263,15 +264,59 @@ async function handleGroups(body) {
 }
 
 async function handleCaptchaSolve(body) {
+  const provider = body.provider || (process.env.CAPTCHA_PROVIDER || "capsolver");
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+      siteKey: body.siteKey || process.env.CAPMONSTER_SITE_KEY,
+      pageUrl: body.pageUrl || process.env.CAPMONSTER_PAGE_URL,
+      pageAction: body.pageAction || process.env.CAPMONSTER_PAGE_ACTION,
+    });
+    const token = await solver.solve({
+      version: body.version || 2,
+      type: body.captchaType || "recaptcha",
+      enterprise: body.enterprise || false,
+      timeout: body.timeout || 180000,
+    });
+    return { ok: true, token, provider: "capmonster" };
+  }
+
+  // Default: CapSolver
   requireEnv(["CAPSOLVER_API_KEY"]);
   const solver = new CapSolver({
-    apiKey: process.env.CAPSOLVER_API_KEY,
+    clientKey: process.env.CAPSOLVER_API_KEY,
     siteKey: body.siteKey || process.env.CAPSOLVER_SITE_KEY,
     pageUrl: body.pageUrl || process.env.CAPSOLVER_PAGE_URL,
     pageAction: body.pageAction || process.env.CAPSOLVER_PAGE_ACTION,
   });
   const token = await solver.solve();
-  return { ok: true, token };
+  return { ok: true, token, provider: "capsolver" };
+}
+
+async function handleCaptchaBalance(body = {}) {
+  const provider = body.provider || (process.env.CAPTCHA_PROVIDER || "capsolver");
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+    });
+    const { balance } = await solver.getBalance();
+    return { ok: true, balance, provider: "capmonster" };
+  }
+
+  // CapSolver
+  requireEnv(["CAPSOLVER_API_KEY"]);
+  const res = await fetch("https://api.capsolver.com/getBalance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clientKey: process.env.CAPSOLVER_API_KEY }),
+  });
+  const json = await res.json();
+  if (json.errorId !== 0) {
+    throw new Error(`CapSolver balance error: ${json.errorDescription || json.errorCode}`);
+  }
+  return { ok: true, balance: json.balance, provider: "capsolver" };
 }
 
 async function handleSchedule(body) {
@@ -446,7 +491,8 @@ const CMD_CATALOG = {
   "captcha-pull":   { args: ["--entity", "--type", "--endpoint", "--output", "--quiet"], description: "Pull one CAPTCHA" },
   "captcha-set":    { args: ["--type", "--token"],       description: "Save a CAPTCHA token" },
   "captcha-show":   { args: [],                          description: "Show the saved token" },
-  "captcha-solve":  { args: ["--v3", "--type"],          description: "Solve CAPTCHA via CapSolver" },
+  "captcha-solve":  { args: ["--v3", "--type", "--capmonster", "--enterprise", "--turnstile"], description: "Solve CAPTCHA via CapSolver (default) or CapMonster (--capmonster)" },
+  "captcha-balance": { args: ["--capmonster"],                   description: "Check solver account balance" },
   "captcha-watch":  { args: ["--entity", "--type", "--interval", "--max-duration", "--endpoint", "--output"], description: "Watch CAPTCHA for a bounded duration (in-process)" },
   "captcha-start":  { args: ["--entity", "--type", "--interval", "--endpoint", "--output"], description: "Start in-process background CAPTCHA refresher" },
   "captcha-status": { args: [],                          description: "Show background refresher status" },
@@ -658,11 +704,19 @@ const API_DOCS = [
   },
   {
     method: "POST", path: "/captcha/solve",
-    description: "Solve a CAPTCHA via CapSolver",
-    auth: "CAPSOLVER_API_KEY env var",
-    body: { siteKey: "string (optional)", pageUrl: "string (optional)", pageAction: "string (optional)" },
-    example: 'curl -X POST https://toque.decloud.workers.dev/captcha/solve -H "Content-Type: application/json" -d \'{}\'',
-    response: { ok: true, token: "captcha-token-string" },
+    description: "Solve a CAPTCHA via CapSolver (default) or CapMonster Cloud (--capmonster)",
+    auth: "CAPSOLVER_API_KEY or CAPMONSTER_API_KEY env var",
+    body: { provider: "string (optional: capsolver|capmonster)", version: "number (optional: 2|3, default 2)", captchaType: "string (optional: recaptcha|turnstile|visa|login|general)", enterprise: "boolean (optional)", siteKey: "string (optional)", pageUrl: "string (optional)", pageAction: "string (optional)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/captcha/solve -H "Content-Type: application/json" -d \'{"provider":"capmonster","version":2}\'',
+    response: { ok: true, token: "captcha-token-string", provider: "capmonster" },
+  },
+  {
+    method: "POST", path: "/captcha/balance",
+    description: "Check captcha solver account balance (CapSolver or CapMonster Cloud)",
+    auth: "CAPSOLVER_API_KEY or CAPMONSTER_API_KEY env var",
+    body: { provider: "string (optional: capsolver|capmonster)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/captcha/balance -H "Content-Type: application/json" -d \'{"provider":"capmonster"}\'',
+    response: { ok: true, balance: 1.50, provider: "capmonster" },
   },
   {
     method: "POST", path: "/schedule",
@@ -732,6 +786,7 @@ const ROUTES = {
   "/request": handleRequest,
   "/groups": handleGroups,
   "/captcha/solve": handleCaptchaSolve,
+  "/captcha/balance": handleCaptchaBalance,
   "/schedule": handleSchedule,
   "/schedule/workflow": handleSchedule,
   "/api-list": handleListApis,

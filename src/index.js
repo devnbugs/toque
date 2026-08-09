@@ -13,9 +13,9 @@ import { jsonResponse } from "./utils.js";
 
 export class ToqueContainer extends Container {
   defaultPort = 8080;
-  // Keep the container alive longer when idle so SSH sessions and scheduled
-  // tasks have time to connect without cold-starting a new instance.
-  sleepAfter = "5m";
+  // Keep the container always active (no scale-to-zero) so SSH sessions,
+  // scheduled tasks, and requests have no cold-start delay.
+  sleepAfter = "99999h";
   // Ensure the container has outbound internet access (enabled by default,
   // but made explicit here for clarity — the Nusuk API needs it).
   enableInternet = true;
@@ -499,8 +499,15 @@ export default {
     const url = new URL(request.url);
 
     // --- Authentication (Cloudflare Access / API key) ---
-    const authError = await authenticate(request, url);
-    if (authError) return authError;
+    // Skip auth for the internal /autha/ proxy path — the container calls
+    // this proxy to reach the autha-worker, and the proxy injects the
+    // WORKER_API_TOKEN via the service binding. The container itself has no
+    // X-API-Key to send (it's internal), so auth would block it.
+    const isAuthaProxy = url.pathname.startsWith("/autha/");
+    if (!isAuthaProxy) {
+      const authError = await authenticate(request, url);
+      if (authError) return authError;
+    }
 
     // --- Help / API docs (GET / and GET /help) ---
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/help")) {

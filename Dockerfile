@@ -60,9 +60,13 @@ WORKDIR /app
 # Copy application code (layer cached separately from deps above)
 COPY . .
 
-# Run as a non-root user for security
-RUN groupadd -r toque && useradd -r -g toque -s /bin/bash toque \
-  && chown -R toque:toque /app
+# Create non-root user and fix permissions for cloakbrowser.
+# The cloakbrowser Chromium binary was pre-downloaded to /root/.cloakbrowser
+# during the build stage. We need to copy it to the toque user's home dir
+# and fix ownership so the non-root user can access it.
+RUN groupadd -r toque && useradd -r -g toque -m -s /bin/bash toque \
+  && cp -r /root/.cloakbrowser /home/toque/.cloakbrowser 2>/dev/null || true \
+  && chown -R toque:toque /app /home/toque
 USER toque
 
 # The container exposes an HTTP server on PORT (default 8080)
