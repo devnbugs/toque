@@ -36,7 +36,7 @@
   "containers": [
     {
       "class_name": "ToqueContainer",
-      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:7cd6f41",
+      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:f31d238",
       "instance_type": "standard-4",
       "max_instances": 1,
       "constraints": {

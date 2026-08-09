@@ -203,7 +203,7 @@ async function handleSend(body) {
   return withNusuk(body, async (nusuk) => {
     const payload = buildVisaPayload(body.payload, groupId, nusuk.captchaToken);
     const res = await nusuk.request(
-      "/umrah/visa_apis/api/Visa/SendToIssueVisa",
+      "/umrah/groups_apis/api/Groups/SendToIssueVisa",
       { method: "POST", payload }
     );
     return { ok: res.ok, status: res.status, data: res.json, timing: res.timing };
@@ -334,7 +334,7 @@ async function handleSchedule(body) {
     }
 
     const res = await nusuk.request(
-      "/umrah/visa_apis/api/Visa/SendToIssueVisa",
+      "/umrah/groups_apis/api/Groups/SendToIssueVisa",
       { method: "POST", payload }
     );
     return {

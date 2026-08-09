@@ -28,7 +28,12 @@
  *   CAPMONSTER_SERVICE_URL — API base URL (default: https://api.capmonster.cloud)
  */
 
-import {
+// Import from the CJS build — the ESM build has a `module.require` bug
+// in CapMonsterCloudClientFactory.CreateUserAgentString() that crashes
+// under native ESM. The CJS build works correctly in both ESM and CJS.
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const {
   CapMonsterCloudClientFactory,
   ClientOptions,
   RecaptchaV2Request,
@@ -37,7 +42,7 @@ import {
   RecaptchaV3EnterpriseRequest,
   TurnstileRequest,
   CommonCaptchaRequest,
-} from "@zennolab_com/capmonstercloud-client";
+} = require("@zennolab_com/capmonstercloud-client");
 
 // Default Nusuk reCAPTCHA site key and page URL
 const DEFAULT_SITE_KEY = "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";

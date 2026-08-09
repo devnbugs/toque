@@ -34,6 +34,8 @@ export class ToqueContainer extends Container {
     WORKER_URL: env.WORKER_URL,
     WORKER_API_TOKEN: env.WORKER_API_TOKEN,
     AUTHA_PROXY_URL: env.AUTHA_PROXY_URL || (env.TOQUE_WORKER_URL ? `${env.TOQUE_WORKER_URL}/autha` : ""),
+    CAPMONSTER_API_KEY: env.CAPMONSTER_API_KEY,
+    CAPSOLVER_API_KEY: env.CAPSOLVER_API_KEY,
   };
 
   onStart() {
