@@ -1113,11 +1113,12 @@ async function cmdCaptchaSolve(args) {
 
   // Default: CapSolver
   const solver = new CapSolver();
-  console.log(`Solving reCAPTCHA v${version} via CapSolver (${solver.pageUrl})...`);
+  const captchaType = turnstile ? "turnstile" : "recaptcha";
+  console.log(`Solving ${turnstile ? "Turnstile" : `reCAPTCHA v${version}${enterprise ? " Enterprise" : ""}`} via CapSolver (${solver.pageUrl})...`);
   const token = await solver.solve({
     version,
-    onStatus: (res) =>
-      console.log(`  status: ${res.status || "unknown"} (${((Date.now() - start) / 1000).toFixed(1)}s)`),
+    type: captchaType,
+    enterprise,
   });
   writeCaptchaToken(token, normalizedType);
   console.log(`\n  captcha token saved (${normalizedType}, ${((Date.now() - start) / 1000).toFixed(1)}s)`);
@@ -1135,17 +1136,11 @@ async function cmdCaptchaBalance(args) {
     return;
   }
 
-  // CapSolver doesn't have a getBalance method — use the REST API directly
-  const apiKey = process.env.CAPSOLVER_API_KEY;
-  if (!apiKey) throw new Error("CAPSOLVER_API_KEY is required");
-  const res = await fetch("https://api.capsolver.com/getBalance", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clientKey: apiKey }),
-  });
-  const json = await res.json();
-  if (json.errorId !== 0) throw new Error(`CapSolver balance error: ${json.errorDescription || json.errorCode}`);
-  console.log(`  CapSolver balance: $${json.balance}`);
+  // CapSolver — use the SDK
+  const solver = new CapSolver();
+  console.log("Checking CapSolver balance...");
+  const { balance } = await solver.getBalance();
+  console.log(`  CapSolver balance: $${balance}`);
 }
 
 function captchaPullOptions(args) {

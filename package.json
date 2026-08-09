@@ -27,6 +27,7 @@
     ".": "./src/nusuk.js"
   },
   "dependencies": {
+    "@captcha-libs/capsolver": "^2.2.0",
     "@cloudflare/containers": "^0.3.7",
     "@zennolab_com/capmonstercloud-client": "^2.8.0",
     "cloakbrowser": "^0.5.6",

@@ -458,18 +458,13 @@ async function handleCaptchaBalance(body = {}) {
     return { ok: true, balance, provider: "capmonster" };
   }
 
-  // CapSolver
+  // CapSolver — use the SDK
   requireEnv(["CAPSOLVER_API_KEY"]);
-  const res = await fetch("https://api.capsolver.com/getBalance", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clientKey: process.env.CAPSOLVER_API_KEY }),
+  const capSolver = new CapSolver({
+    clientKey: process.env.CAPSOLVER_API_KEY,
   });
-  const json = await res.json();
-  if (json.errorId !== 0) {
-    throw new Error(`CapSolver balance error: ${json.errorDescription || json.errorCode}`);
-  }
-  return { ok: true, balance: json.balance, provider: "capsolver" };
+  const { balance } = await capSolver.getBalance();
+  return { ok: true, balance, provider: "capsolver" };
 }
 
 async function handleSchedule(body) {
