@@ -557,6 +557,110 @@ async function cmdLogin(args) {
   if (!result.token) process.exitCode = 1;
 }
 
+async function cmdAutoLogin(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const provider = args.includes("--capmonster") ? "capmonster" : (getArg("--provider") || process.env.CAPTCHA_PROVIDER || "capmonster");
+  const siteKey = getArg("--site-key") || process.env.CAPTCHA_SITE_KEY || process.env.CAPMONSTER_SITE_KEY || "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";
+  const pageUrl = getArg("--page-url") || process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/pub/login";
+  const xChannel = getArg("--x-channel") || process.env.X_CHANNEL || "ZlEW8G0jE195d1hY+hvN6/0T9KljTFeVg798I3V1t6I=";
+  const trustedDeviceToken = getArg("--trusted-device-token") || process.env.TRUSTED_DEVICE_TOKEN;
+  const loginAuthToken = getArg("--auth-token") || process.env.LOGIN_AUTH_TOKEN;
+  const otpTimeStamp = getArg("--otp-timestamp") || process.env.OTP_TIMESTAMP || "";
+  const captchaVersion = Number(getArg("--captcha-version") || 2);
+  const captchaType = getArg("--captcha-type") || "recaptcha";
+  const enterprise = args.includes("--enterprise");
+
+  console.log(`Auto-login via ${provider}...`);
+  console.log(`  site key : ${siteKey}`);
+  console.log(`  page url : ${pageUrl}`);
+
+  // Step 1: Solve the captcha
+  let captchaToken;
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+      siteKey,
+      pageUrl,
+      pageAction: getArg("--page-action") || process.env.CAPMONSTER_PAGE_ACTION,
+    });
+    console.log("  solving captcha via CapMonster Cloud...");
+    captchaToken = await solver.solve({
+      version: captchaVersion,
+      type: captchaType,
+      enterprise,
+      timeout: 180000,
+    });
+  } else {
+    if (!process.env.CAPSOLVER_API_KEY) throw new Error("CAPSOLVER_API_KEY is required");
+    const solver = new CapSolver({
+      clientKey: process.env.CAPSOLVER_API_KEY,
+      siteKey,
+      pageUrl,
+      pageAction: getArg("--page-action") || process.env.CAPSOLVER_PAGE_ACTION,
+    });
+    console.log("  solving captcha via CapSolver...");
+    captchaToken = await solver.solve();
+  }
+  console.log(`  captcha  : ${captchaToken.slice(0, 40)}...`);
+
+  // Step 2: Build login payload and headers
+  const loginPayload = {
+    captchaResponse: captchaToken,
+    otpTimeStamp,
+  };
+  const loginHeaders = {
+    "X-Lang": "en",
+    "X-Channel": xChannel,
+  };
+  if (trustedDeviceToken) loginHeaders["trusteddevicetoken"] = trustedDeviceToken;
+  if (loginAuthToken) loginHeaders["authorization"] = loginAuthToken;
+
+  // Step 3: Send the login request (skip auth — no JWT yet)
+  console.log("  sending login request...");
+  const nusuk = new Nusuk({
+    referer: "https://masar.nusuk.sa/pub/login",
+  });
+  await nusuk.init();
+  try {
+    const res = await nusuk.request("/eh/public/authentication/login", {
+      method: "POST",
+      payload: loginPayload,
+      headers: loginHeaders,
+    });
+    console.log(`  status   : ${res.status}`);
+    if (res.timing) console.log(`  timing   :`, res.timing);
+
+    // Step 4: Save the JWT token if login succeeded
+    const token = res.json?.response?.data?.authInfo?.userToken;
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      let existing = {};
+      try { existing = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+      writePrivateJson(authPath, existing);
+      console.log(`  auth     : valid JWT saved to ${authPath}`);
+      if (entityId) console.log(`  entity   : ${entityId}`);
+    } else {
+      console.log(`  auth     : no token in response`);
+      process.exitCode = 1;
+    }
+    if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
+    else console.log(`  body     :`, res.body);
+  } finally {
+    await nusuk.close();
+  }
+}
+
 async function cmdPull(args) {
   const getArg = (flag) => {
     const i = args.indexOf(flag);
@@ -1576,6 +1680,7 @@ Usage: nusuk <command> [options]
 Common tasks:
   init                  Create ignored local config files after a fresh clone
   login                 Install the latest user credentials
+  login-auto            Auto-login via captcha solver and save JWT
   logout                Clear local auth, captcha, and entity state
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
@@ -1597,6 +1702,7 @@ Help:
 
 Examples:
   nusuk login
+  nusuk login-auto --capmonster
   nusuk info
   nusuk send 12345
   nusuk api verify-subscription
@@ -1721,6 +1827,10 @@ async function main() {
       break;
     case "login":
       await cmdLogin(args);
+      break;
+    case "login-auto":
+    case "autologin":
+      await cmdAutoLogin(args);
       break;
     case "workflow":
       await cmdWorkflow(args);

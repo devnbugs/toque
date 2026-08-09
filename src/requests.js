@@ -14,6 +14,19 @@
  * - captcha: whether to inject captchaToken automatically
  */
 export const REQUESTS = Object.freeze({
+  "auto-login": Object.freeze({
+    name: "auto-login",
+    description: "Login to Nusuk and retrieve a fresh JWT auth token",
+    path: "/eh/public/authentication/login",
+    method: "POST",
+    payload: Object.freeze({}),
+    captcha: true,
+    captchaField: "captchaResponse",
+    extraHeaders: Object.freeze({
+      "X-Lang": "en",
+      "X-Channel": "ZlEW8G0jE195d1hY+hvN6/0T9KljTFeVg798I3V1t6I=",
+    }),
+  }),
   "company-info": Object.freeze({
     name: "company-info",
     description: "Show dashboard company information",

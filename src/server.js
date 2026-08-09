@@ -75,10 +75,11 @@ function buildNusuk(body = {}) {
     },
   });
 
+  const skipAuth = body.skipAuth === true;
   const authToken = body.authToken || process.env.AUTH_TOKEN || process.env.NUSUK_AUTH_TOKEN;
   if (authToken) {
     nusuk.setAuthToken(authToken);
-  } else {
+  } else if (!skipAuth) {
     nusuk.loadAuth();
   }
 
@@ -215,12 +216,19 @@ async function handleApi(body) {
   const request = getRequest(name);
   if (!request) throw new Error(`Unknown API request: ${body.name}`);
   return withNusuk(body, async (nusuk) => {
-    const payload = request.captcha
-      ? { ...request.payload, captchaToken: nusuk.captchaToken }
-      : request.payload;
+    let payload = { ...request.payload };
+    if (request.captcha) {
+      const field = request.captchaField || "captchaToken";
+      payload[field] = nusuk.captchaToken;
+    }
+    if (body.payload) {
+      payload = { ...payload, ...body.payload };
+    }
+    const headers = { ...(request.extraHeaders || {}), ...(body.headers || {}) };
     const res = await nusuk.request(request.path, {
       method: request.method,
       payload,
+      headers,
     });
     return { ok: res.ok, status: res.status, data: res.json, timing: res.timing };
   });
@@ -259,6 +267,91 @@ async function handleGroups(body) {
       status: res.status,
       groups: formatGroups(groups),
       raw: body.raw ? res.json : undefined,
+    };
+  });
+}
+
+async function handleAutoLogin(body = {}) {
+  // Solve a captcha via the configured provider, then send the login request
+  // to /eh/public/authentication/login. The response contains a JWT that is
+  // saved to auth.json for subsequent requests.
+  const provider = body.provider || process.env.CAPTCHA_PROVIDER || "capmonster";
+  const siteKey = body.siteKey || process.env.CAPTCHA_SITE_KEY || process.env.CAPMONSTER_SITE_KEY || "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";
+  const pageUrl = body.pageUrl || process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/pub/login";
+
+  let captchaToken;
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+      siteKey,
+      pageUrl,
+      pageAction: body.pageAction || process.env.CAPMONSTER_PAGE_ACTION,
+    });
+    captchaToken = await solver.solve({
+      version: body.captchaVersion || 2,
+      type: body.captchaType || "recaptcha",
+      enterprise: body.enterprise || false,
+      timeout: body.timeout || 180000,
+    });
+  } else {
+    requireEnv(["CAPSOLVER_API_KEY"]);
+    const solver = new CapSolver({
+      clientKey: process.env.CAPSOLVER_API_KEY,
+      siteKey: body.siteKey || process.env.CAPSOLVER_SITE_KEY || siteKey,
+      pageUrl: body.pageUrl || process.env.CAPSOLVER_PAGE_URL || pageUrl,
+      pageAction: body.pageAction || process.env.CAPSOLVER_PAGE_ACTION,
+    });
+    captchaToken = await solver.solve();
+  }
+
+  // Build the login payload
+  const otpTimeStamp = body.otpTimeStamp || process.env.OTP_TIMESTAMP || "";
+  const loginPayload = {
+    captchaResponse: captchaToken,
+    otpTimeStamp,
+  };
+
+  // Custom headers for login — these differ from normal Nusuk requests
+  const loginHeaders = {
+    "X-Lang": "en",
+    "X-Channel": body.xChannel || process.env.X_CHANNEL || "ZlEW8G0jE195d1hY+hvN6/0T9KljTFeVg798I3V1t6I=",
+  };
+  if (body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN) {
+    loginHeaders["trusteddevicetoken"] = body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN;
+  }
+  if (body.authorization || process.env.LOGIN_AUTH_TOKEN) {
+    loginHeaders["authorization"] = body.authorization || process.env.LOGIN_AUTH_TOKEN;
+  }
+
+  return withNusuk({ ...body, skipAuth: true }, async (nusuk) => {
+    const res = await nusuk.request("/eh/public/authentication/login", {
+      method: "POST",
+      payload: loginPayload,
+      headers: loginHeaders,
+    });
+
+    // Save the JWT token if login succeeded
+    const token = res.json?.response?.data?.authInfo?.userToken;
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      const existing = readJsonIfExists(authPath, {});
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      existing.response.data.authInfo.entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || existing.response.data.authInfo.entityTypeId;
+      writePrivateJson(authPath, existing);
+    }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: res.json,
+      captchaToken,
+      saved: Boolean(token),
+      timing: res.timing,
     };
   });
 }
@@ -475,6 +568,7 @@ async function captchaWatchBounded(options = {}) {
 const CMD_CATALOG = {
   init:             { args: [],                          description: "Create local config files" },
   login:            { args: ["--system-user", "--type", "--endpoint"], description: "Install latest user credentials" },
+  "login-auto":     { args: ["--capmonster", "--provider", "--site-key", "--page-url", "--x-channel", "--trusted-device-token", "--auth-token", "--otp-timestamp", "--captcha-version", "--captcha-type", "--enterprise"], description: "Auto-login via captcha solver and save JWT" },
   logout:           { args: [],                          description: "Clear local auth/captcha/entity state" },
   pull:             { args: ["--entity", "--type", "--endpoint"], description: "Refresh auth, entity, and CAPTCHA" },
   info:             { args: [],                          description: "Show dashboard company info" },
@@ -785,6 +879,7 @@ const ROUTES = {
   "/api": handleApi,
   "/request": handleRequest,
   "/groups": handleGroups,
+  "/login": handleAutoLogin,
   "/captcha/solve": handleCaptchaSolve,
   "/captcha/balance": handleCaptchaBalance,
   "/schedule": handleSchedule,

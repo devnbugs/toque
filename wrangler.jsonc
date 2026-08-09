@@ -30,7 +30,7 @@
   ],
   "placement": {
     "mode": "targeted",
-    "region": "aws:us-east-1"
+    "region": "aws:eu-central-1"
   },
   "preview_urls": false,
   "containers": [
@@ -41,8 +41,8 @@
       "max_instances": 1,
       "constraints": {
         "regions": [
-          "ENAM",
-          "WNAM"
+          "WEUR",
+          "EEUR"
         ]
       },
       "ssh": {
