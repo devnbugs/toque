@@ -668,6 +668,69 @@ async function cmdAutoLogin(args) {
   }
 }
 
+async function cmdVerifyLogin(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const transactionId = getArg("--transaction-id") || getArg("--transaction");
+  const otpCode = getArg("--otp") || getArg("--code");
+  const system = getArg("--system") || "1";
+  const module = getArg("--module") || "1";
+
+  if (!transactionId) throw new Error("Transaction ID is required. Pass --transaction-id <id> (from login-auto response)");
+  if (!otpCode) throw new Error("OTP code is required. Pass --otp <4-digit-code>");
+
+  console.log(`Verifying OTP...`);
+  console.log(`  transaction : ${transactionId}`);
+  console.log(`  otp code    : ${otpCode}`);
+
+  const { buildOtpTimeStamp } = await import("../src/nusuk-crypto.js");
+  const verifyPayload = {
+    transactionId,
+    system,
+    module,
+    otpCode,
+    otpTimeStamp: buildOtpTimeStamp(),
+  };
+
+  const nusuk = new Nusuk({ referer: "https://masar.nusuk.sa/pub/login" });
+  await nusuk.init();
+  try {
+    const res = await nusuk.request("/eh/public/authentication/verifyLogin", {
+      method: "POST",
+      payload: verifyPayload,
+    });
+    console.log(`  status      : ${res.status}`);
+    if (res.timing) console.log(`  timing      :`, res.timing);
+
+    const token = res.json?.response?.data?.authInfo?.userToken || res.json?.response?.data?.token;
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      let existing = {};
+      try { existing = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+      writePrivateJson(authPath, existing);
+      console.log(`  auth        : valid JWT saved to ${authPath}`);
+      if (entityId) console.log(`  entity      : ${entityId}`);
+    } else {
+      console.log(`  auth        : no token in response`);
+      process.exitCode = 1;
+    }
+    if (res.json) console.log(`  body        :`, JSON.stringify(res.json, null, 2));
+    else console.log(`  body        :`, res.body);
+  } finally {
+    await nusuk.close();
+  }
+}
+
 async function cmdPull(args) {
   const getArg = (flag) => {
     const i = args.indexOf(flag);
@@ -1688,6 +1751,7 @@ Common tasks:
   init                  Create ignored local config files after a fresh clone
   login                 Install the latest user credentials
   login-auto            Auto-login via captcha solver and save JWT
+  verify-login          Verify OTP after auto-login (requires transaction ID)
   logout                Clear local auth, captcha, and entity state
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
@@ -1710,6 +1774,7 @@ Help:
 Examples:
   nusuk login
   nusuk login-auto --username user@email.com --password pass123
+  nusuk verify-login --transaction-id <id> --otp 1234
   nusuk info
   nusuk send 12345
   nusuk api verify-subscription
@@ -1838,6 +1903,9 @@ async function main() {
     case "login-auto":
     case "autologin":
       await cmdAutoLogin(args);
+      break;
+    case "verify-login":
+      await cmdVerifyLogin(args);
       break;
     case "workflow":
       await cmdWorkflow(args);

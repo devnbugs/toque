@@ -331,6 +331,10 @@ async function handleAutoLogin(body = {}) {
 
     // Save the JWT token if login succeeded
     const token = res.json?.response?.data?.authInfo?.userToken;
+    const otpRequired = res.json?.response?.data?.otpType !== undefined && res.json?.response?.data?.authInfo === null;
+    const intermediateToken = res.json?.response?.data?.token;
+    const transactionId = res.json?.response?.data?.transactionId;
+
     if (token) {
       const authPath = process.env.AUTH_PATH || "auth.json";
       const existing = readJsonIfExists(authPath, {});
@@ -349,6 +353,63 @@ async function handleAutoLogin(body = {}) {
       status: res.status,
       data: res.json,
       captchaToken,
+      saved: Boolean(token),
+      otpRequired,
+      transactionId,
+      intermediateToken: otpRequired ? intermediateToken : undefined,
+      timing: res.timing,
+    };
+  });
+}
+
+async function handleVerifyLogin(body = {}) {
+  // Verify OTP after auto-login. Requires the transactionId from the login
+  // response and the OTP code sent to the user's email/phone.
+  const transactionId = body.transactionId;
+  if (!transactionId) throw new Error("transactionId is required (from /login response)");
+  const otpCode = body.otpCode;
+  if (!otpCode) throw new Error("otpCode is required (the OTP sent to email/phone)");
+
+  const system = body.system || "1";
+  const module = body.module || "1";
+
+  // Build the verify payload
+  const verifyPayload = {
+    transactionId,
+    system,
+    module,
+    otpCode,
+  };
+
+  // Generate a fresh otpTimeStamp for the verify request
+  const { buildOtpTimeStamp } = await import("./nusuk-crypto.js");
+  verifyPayload.otpTimeStamp = buildOtpTimeStamp(body.aesKey || process.env.NUSUK_AES_KEY);
+
+  return withNusuk({ ...body, skipAuth: true, skipCaptcha: true }, async (nusuk) => {
+    const res = await nusuk.request("/eh/public/authentication/verifyLogin", {
+      method: "POST",
+      payload: verifyPayload,
+    });
+
+    // Save the JWT token if verification succeeded
+    const token = res.json?.response?.data?.authInfo?.userToken || res.json?.response?.data?.token;
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      const existing = readJsonIfExists(authPath, {});
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      existing.response.data.authInfo.entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || existing.response.data.authInfo.entityTypeId;
+      writePrivateJson(authPath, existing);
+    }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: res.json,
       saved: Boolean(token),
       timing: res.timing,
     };
@@ -568,6 +629,7 @@ const CMD_CATALOG = {
   init:             { args: [],                          description: "Create local config files" },
   login:            { args: ["--system-user", "--type", "--endpoint"], description: "Install latest user credentials" },
   "login-auto":     { args: ["--capmonster", "--provider", "--username", "--password", "--site-key", "--page-url", "--x-channel", "--trusted-device-token", "--captcha-version", "--captcha-type", "--enterprise"], description: "Auto-login via captcha solver and save JWT" },
+  "verify-login":   { args: ["--transaction-id", "--otp", "--system", "--module"], description: "Verify OTP after auto-login" },
   logout:           { args: [],                          description: "Clear local auth/captcha/entity state" },
   pull:             { args: ["--entity", "--type", "--endpoint"], description: "Refresh auth, entity, and CAPTCHA" },
   info:             { args: [],                          description: "Show dashboard company info" },
@@ -804,6 +866,14 @@ const API_DOCS = [
     response: { ok: true, status: 200, data: "{ ...login response }", captchaToken: "solved-captcha", saved: true, timing: "{ total, ttfb }" },
   },
   {
+    method: "POST", path: "/verify-login",
+    description: "Verify OTP after auto-login. Sends authentication/verifyLogin with the transactionId and OTP code, saves the final JWT to auth.json.",
+    auth: "none (uses browser session from /login)",
+    body: { transactionId: "string (required — from /login response)", otpCode: "string (required — 4-digit OTP sent to email/phone)", system: "string (optional, default: 1)", module: "string (optional, default: 1)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/verify-login -H "Content-Type: application/json" -d \'{"transactionId":"abc-123","otpCode":"1234"}\'',
+    response: { ok: true, status: 200, data: "{ ...verify response with authInfo.userToken }", saved: true, timing: "{ total, ttfb }" },
+  },
+  {
     method: "POST", path: "/captcha/solve",
     description: "Solve a CAPTCHA via CapSolver (default) or CapMonster Cloud (--capmonster)",
     auth: "CAPSOLVER_API_KEY or CAPMONSTER_API_KEY env var",
@@ -887,6 +957,7 @@ const ROUTES = {
   "/request": handleRequest,
   "/groups": handleGroups,
   "/login": handleAutoLogin,
+  "/verify-login": handleVerifyLogin,
   "/captcha/solve": handleCaptchaSolve,
   "/captcha/balance": handleCaptchaBalance,
   "/schedule": handleSchedule,
