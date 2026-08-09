@@ -70,18 +70,19 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           TAG="$(git rev-parse --short=7 HEAD)"
-          echo "Building image with tag: $TAG"
+          IMAGE_NAME="toque:${TAG}"
+          echo "Building image: ${IMAGE_NAME}"
           # wrangler containers build -p builds locally and pushes to
-          # registry.cloudflare.com/<ACCOUNT_ID>/<IMAGE>:<TAG>
-          OUTPUT=$(npx wrangler containers build -p -t "$TAG" . 2>&1 | tee /dev/stderr)
-          # Extract the registry URI — match either the tagged format or
-          # the "latest: digest:" format that newer wrangler versions emit.
+          # registry.cloudflare.com/<ACCOUNT_ID>/<IMAGE_NAME>
+          # The -t flag takes "name:tag" — the name becomes the registry repo.
+          OUTPUT=$(npx wrangler containers build -p -t "$IMAGE_NAME" . 2>&1 | tee /dev/stderr)
+          # Extract the registry URI from the push output.
           IMAGE=$(echo "$OUTPUT" | grep -oE 'registry\.cloudflare\.com/[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+' | head -n1)
           if [ -z "$IMAGE" ]; then
-            # Fallback: construct from account ID + tag
+            # Fallback: construct from account ID + image name
             ACCOUNT_ID=$(npx wrangler whoami 2>/dev/null | grep -oE '[a-f0-9]{32}' | head -1)
             if [ -n "$ACCOUNT_ID" ]; then
-              IMAGE="registry.cloudflare.com/${ACCOUNT_ID}/toque:${TAG}"
+              IMAGE="registry.cloudflare.com/${ACCOUNT_ID}/${IMAGE_NAME}"
               echo "Constructed image URI from account ID: $IMAGE"
             fi
           fi
