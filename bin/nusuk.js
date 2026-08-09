@@ -15,7 +15,7 @@ import { CapMonsterSolver } from "../src/capmonster.js";
 import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
 import { computeSendSchedule } from "../src/scheduling.js";
 import { buildVisaPayload } from "../src/visa-payload.js";
-import { buildLoginRequest } from "../src/nusuk-crypto.js";
+import { buildLoginRequest, DEFAULT_TRUSTED_DEVICE_TOKEN } from "../src/nusuk-crypto.js";
 import { summarizeRequestTiming } from "../src/timing.js";
 import { writePrivateJson, ms, formatTime } from "../src/utils.js";
 import {
@@ -567,7 +567,7 @@ async function cmdAutoLogin(args) {
   const siteKey = getArg("--site-key") || process.env.CAPTCHA_SITE_KEY || process.env.CAPMONSTER_SITE_KEY || "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";
   const pageUrl = getArg("--page-url") || process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/pub/login";
   const xChannel = getArg("--x-channel") || process.env.X_CHANNEL || "ZlEW8G0jE195d1hY+hvN6/0T9KljTFeVg798I3V1t6I=";
-  const trustedDeviceToken = getArg("--trusted-device-token") || process.env.TRUSTED_DEVICE_TOKEN;
+  const trustedDeviceToken = getArg("--trusted-device-token") || process.env.TRUSTED_DEVICE_TOKEN || DEFAULT_TRUSTED_DEVICE_TOKEN;
   const username = getArg("--username") || getArg("--user") || process.env.NUSUK_USERNAME;
   const password = getArg("--password") || getArg("--pass") || process.env.NUSUK_PASSWORD;
   const aesKey = getArg("--aes-key") || process.env.NUSUK_AES_KEY;

@@ -142,3 +142,13 @@ export function buildLoginRequest({ username, password, captchaToken, key, xChan
 
   return { payload, headers };
 }
+
+// Default trusted device token — a device fingerprint captured from the
+// Nusuk portal. This helps the login request appear to come from a
+// recognized device. Can be overridden via the trustedDeviceToken param.
+export const DEFAULT_TRUSTED_DEVICE_TOKEN =
+  "tdt_Gi3teh3wgR7ddvYyVKoG3w==#equals#pSAyPQlQ8lGktne1R0TWXUUQFbWUkVLOmhNWEYjmxoYoOA/B5nsYpgwQ7YJg33lE#endHeader#" +
+  "tdt_e1PqAI8byVqjAds6PppUXw==#equals#+wMd5sCrkspDrxqgbbwowQzyU1CXPevMl+5NogHUTyTRjWw9AnIW0uA1a8MMqDp2#endHeader#" +
+  "tdt_7WxtRzbg6+I8BVGXlKlsyg==#equals#ndKoQJJaq3ruHobZSEenboitV3LoaDmCU5d4B8vAVFew/hohYcLinqn96qkyMkNI#endHeader#" +
+  "tdt_NIiCn+wEL+B2uE1Ts1LgHA==#equals#btXPvXSni9o9Nh9zGvKKyWB5m9Yawl6+AVKhHVgEbl+1LsdH4hjqAm6IQoU3qTs+yJQ7KiC2GHnZFximOfEbVg==#endHeader#" +
+  "tdt_ml0+z+qVaOwBiA/UJISKWA==#equals#FUGaCuOJrDL4kXzNIz049cwY/vtrZpI+Uj7h7XlAmS0W709g2xRRHVjD+8BqiaTA#endHeader#";

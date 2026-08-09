@@ -16,7 +16,7 @@ import { AuthaWorker } from "./worker.js";
 import { CapSolver } from "./capsolver.js";
 import { CapMonsterSolver } from "./capmonster.js";
 import { buildVisaPayload } from "./visa-payload.js";
-import { buildLoginRequest } from "./nusuk-crypto.js";
+import { buildLoginRequest, DEFAULT_TRUSTED_DEVICE_TOKEN } from "./nusuk-crypto.js";
 import { getRequest, listRequests } from "./requests.js";
 import { extractGroups, formatGroups, normalizeGroupId } from "./groups.js";
 import { computeSendSchedule } from "./scheduling.js";
@@ -319,7 +319,7 @@ async function handleAutoLogin(body = {}) {
     captchaToken,
     key: body.aesKey || process.env.NUSUK_AES_KEY,
     xChannel: body.xChannel || process.env.X_CHANNEL,
-    trustedDeviceToken: body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN,
+    trustedDeviceToken: body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN || DEFAULT_TRUSTED_DEVICE_TOKEN,
   });
 
   return withNusuk({ ...body, skipAuth: true, skipCaptcha: true }, async (nusuk) => {
