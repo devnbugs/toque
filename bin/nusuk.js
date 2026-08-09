@@ -15,6 +15,7 @@ import { CapMonsterSolver } from "../src/capmonster.js";
 import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
 import { computeSendSchedule } from "../src/scheduling.js";
 import { buildVisaPayload } from "../src/visa-payload.js";
+import { buildLoginRequest } from "../src/nusuk-crypto.js";
 import { summarizeRequestTiming } from "../src/timing.js";
 import { writePrivateJson, ms, formatTime } from "../src/utils.js";
 import {
@@ -567,15 +568,21 @@ async function cmdAutoLogin(args) {
   const pageUrl = getArg("--page-url") || process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/pub/login";
   const xChannel = getArg("--x-channel") || process.env.X_CHANNEL || "ZlEW8G0jE195d1hY+hvN6/0T9KljTFeVg798I3V1t6I=";
   const trustedDeviceToken = getArg("--trusted-device-token") || process.env.TRUSTED_DEVICE_TOKEN;
-  const loginAuthToken = getArg("--auth-token") || process.env.LOGIN_AUTH_TOKEN;
-  const otpTimeStamp = getArg("--otp-timestamp") || process.env.OTP_TIMESTAMP || "";
+  const username = getArg("--username") || getArg("--user") || process.env.NUSUK_USERNAME;
+  const password = getArg("--password") || getArg("--pass") || process.env.NUSUK_PASSWORD;
+  const aesKey = getArg("--aes-key") || process.env.NUSUK_AES_KEY;
   const captchaVersion = Number(getArg("--captcha-version") || 2);
   const captchaType = getArg("--captcha-type") || "recaptcha";
   const enterprise = args.includes("--enterprise");
 
+  if (!username || !password) {
+    throw new Error("Username and password are required. Pass --username <email> --password <pass> or set NUSUK_USERNAME/NUSUK_PASSWORD env vars");
+  }
+
   console.log(`Auto-login via ${provider}...`);
   console.log(`  site key : ${siteKey}`);
   console.log(`  page url : ${pageUrl}`);
+  console.log(`  username : ${username}`);
 
   // Step 1: Solve the captcha
   let captchaToken;
@@ -606,17 +613,17 @@ async function cmdAutoLogin(args) {
   }
   console.log(`  captcha  : ${captchaToken.slice(0, 40)}...`);
 
-  // Step 2: Build login payload and headers
-  const loginPayload = {
-    captchaResponse: captchaToken,
-    otpTimeStamp,
-  };
-  const loginHeaders = {
-    "X-Lang": "en",
-    "X-Channel": xChannel,
-  };
-  if (trustedDeviceToken) loginHeaders["trusteddevicetoken"] = trustedDeviceToken;
-  if (loginAuthToken) loginHeaders["authorization"] = loginAuthToken;
+  // Step 2: Build login payload and headers using Nusuk's encryption
+  const { payload: loginPayload, headers: loginHeaders } = buildLoginRequest({
+    username,
+    password,
+    captchaToken,
+    key: aesKey,
+    xChannel,
+    trustedDeviceToken,
+  });
+  console.log(`  otp      : ${loginPayload.otpTimeStamp.slice(0, 30)}...`);
+  console.log(`  auth     : ${loginHeaders.authorization.slice(0, 30)}...`);
 
   // Step 3: Send the login request (skip auth — no JWT yet)
   console.log("  sending login request...");
@@ -1702,7 +1709,7 @@ Help:
 
 Examples:
   nusuk login
-  nusuk login-auto --capmonster
+  nusuk login-auto --username user@email.com --password pass123
   nusuk info
   nusuk send 12345
   nusuk api verify-subscription

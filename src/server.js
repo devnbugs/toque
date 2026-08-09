@@ -16,6 +16,7 @@ import { AuthaWorker } from "./worker.js";
 import { CapSolver } from "./capsolver.js";
 import { CapMonsterSolver } from "./capmonster.js";
 import { buildVisaPayload } from "./visa-payload.js";
+import { buildLoginRequest } from "./nusuk-crypto.js";
 import { getRequest, listRequests } from "./requests.js";
 import { extractGroups, formatGroups, normalizeGroupId } from "./groups.js";
 import { computeSendSchedule } from "./scheduling.js";
@@ -273,12 +274,18 @@ async function handleGroups(body) {
 }
 
 async function handleAutoLogin(body = {}) {
-  // Solve a captcha via the configured provider, then send the login request
-  // to /eh/public/authentication/login. The response contains a JWT that is
-  // saved to auth.json for subsequent requests.
+  // Auto-login: solve a CAPTCHA, encrypt credentials, send login request,
+  // and save the returned JWT to auth.json.
   const provider = body.provider || process.env.CAPTCHA_PROVIDER || "capmonster";
   const siteKey = body.siteKey || process.env.CAPTCHA_SITE_KEY || process.env.CAPMONSTER_SITE_KEY || "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";
   const pageUrl = body.pageUrl || process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/pub/login";
+
+  // Require username/password for credential encryption
+  const username = body.username || process.env.NUSUK_USERNAME;
+  const password = body.password || process.env.NUSUK_PASSWORD;
+  if (!username || !password) {
+    throw new Error("username and password are required (pass in body or set NUSUK_USERNAME/NUSUK_PASSWORD env vars)");
+  }
 
   let captchaToken;
   if (provider === "capmonster") {
@@ -305,24 +312,15 @@ async function handleAutoLogin(body = {}) {
     captchaToken = await solver.solve();
   }
 
-  // Build the login payload
-  const otpTimeStamp = body.otpTimeStamp || process.env.OTP_TIMESTAMP || "";
-  const loginPayload = {
-    captchaResponse: captchaToken,
-    otpTimeStamp,
-  };
-
-  // Custom headers for login — these differ from normal Nusuk requests
-  const loginHeaders = {
-    "X-Lang": "en",
-    "X-Channel": body.xChannel || process.env.X_CHANNEL || "ZlEW8G0jE195d1hY+hvN6/0T9KljTFeVg798I3V1t6I=",
-  };
-  if (body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN) {
-    loginHeaders["trusteddevicetoken"] = body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN;
-  }
-  if (body.authorization || process.env.LOGIN_AUTH_TOKEN) {
-    loginHeaders["authorization"] = body.authorization || process.env.LOGIN_AUTH_TOKEN;
-  }
+  // Build the login payload and headers using Nusuk's encryption
+  const { payload: loginPayload, headers: loginHeaders } = buildLoginRequest({
+    username,
+    password,
+    captchaToken,
+    key: body.aesKey || process.env.NUSUK_AES_KEY,
+    xChannel: body.xChannel || process.env.X_CHANNEL,
+    trustedDeviceToken: body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN,
+  });
 
   return withNusuk({ ...body, skipAuth: true, skipCaptcha: true }, async (nusuk) => {
     const res = await nusuk.request("/eh/public/authentication/login", {
@@ -569,7 +567,7 @@ async function captchaWatchBounded(options = {}) {
 const CMD_CATALOG = {
   init:             { args: [],                          description: "Create local config files" },
   login:            { args: ["--system-user", "--type", "--endpoint"], description: "Install latest user credentials" },
-  "login-auto":     { args: ["--capmonster", "--provider", "--site-key", "--page-url", "--x-channel", "--trusted-device-token", "--auth-token", "--otp-timestamp", "--captcha-version", "--captcha-type", "--enterprise"], description: "Auto-login via captcha solver and save JWT" },
+  "login-auto":     { args: ["--capmonster", "--provider", "--username", "--password", "--site-key", "--page-url", "--x-channel", "--trusted-device-token", "--captcha-version", "--captcha-type", "--enterprise"], description: "Auto-login via captcha solver and save JWT" },
   logout:           { args: [],                          description: "Clear local auth/captcha/entity state" },
   pull:             { args: ["--entity", "--type", "--endpoint"], description: "Refresh auth, entity, and CAPTCHA" },
   info:             { args: [],                          description: "Show dashboard company info" },
@@ -796,6 +794,14 @@ const API_DOCS = [
     body: { limit: "number (optional, default 10)", offset: "number (optional, default 0)", raw: "boolean (optional)" },
     example: 'curl -X POST https://toque.decloud.workers.dev/groups -H "Content-Type: application/json" -d \'{"limit": 10}\'',
     response: { ok: true, status: 200, groups: "[{ id, name }]", raw: "(if raw=true)" },
+  },
+  {
+    method: "POST", path: "/login",
+    description: "Auto-login to Nusuk: solves a CAPTCHA, encrypts credentials (AES-128-CBC), sends /eh/public/authentication/login, saves JWT to auth.json",
+    auth: "CAPMONSTER_API_KEY or CAPSOLVER_API_KEY env var",
+    body: { username: "string (required — login email)", password: "string (required — login password)", provider: "string (optional: capmonster|capsolver, default: capmonster)", xChannel: "string (optional)", trustedDeviceToken: "string (optional)", siteKey: "string (optional)", pageUrl: "string (optional)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/login -H "Content-Type: application/json" -d \'{"username":"user@email.com","password":"pass123","provider":"capmonster"}\'',
+    response: { ok: true, status: 200, data: "{ ...login response }", captchaToken: "solved-captcha", saved: true, timing: "{ total, ttfb }" },
   },
   {
     method: "POST", path: "/captcha/solve",

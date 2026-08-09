@@ -418,7 +418,7 @@ const API_DOCS = [
     method: "ANY",
     path: "/* (all other paths)",
     description:
-      "All other requests are proxied to the Toque container, which handles: /pull, /info, /send, /api, /request, /groups, /captcha/solve, /schedule, /cmd, /cmd/list, /api-list, /health",
+      "All other requests are proxied to the Toque container, which handles: /pull, /info, /send, /api, /request, /groups, /login, /captcha/solve, /captcha/balance, /schedule, /cmd, /cmd/list, /api-list, /health",
     note: "See the container's /help endpoint for full docs: curl https://toque.decloud.workers.dev/help",
   },
 ];
