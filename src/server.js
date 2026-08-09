@@ -217,7 +217,10 @@ async function handleApi(body) {
   const name = String(body.name || "").trim().toLowerCase();
   const request = getRequest(name);
   if (!request) throw new Error(`Unknown API request: ${body.name}`);
-  return withNusuk(body, async (nusuk) => {
+  // Skip captcha loading when the catalog entry doesn't need it — avoids
+  // requiring captcha.json for endpoints that never send a captchaToken.
+  const effectiveBody = request.captcha ? body : { ...body, skipCaptcha: true };
+  return withNusuk(effectiveBody, async (nusuk) => {
     let payload = { ...request.payload };
     if (request.captcha) {
       const field = request.captchaField || "captchaToken";
