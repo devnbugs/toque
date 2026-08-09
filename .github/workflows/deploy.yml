@@ -24,7 +24,7 @@ on:
         default: ""
 
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: "26"
 
 # Prevent overlapping deployments for the same branch; queue pushes
 concurrency:
@@ -74,7 +74,17 @@ jobs:
           # wrangler containers build -p builds locally and pushes to
           # registry.cloudflare.com/<ACCOUNT_ID>/<IMAGE>:<TAG>
           OUTPUT=$(npx wrangler containers build -p -t "$TAG" . 2>&1 | tee /dev/stderr)
+          # Extract the registry URI — match either the tagged format or
+          # the "latest: digest:" format that newer wrangler versions emit.
           IMAGE=$(echo "$OUTPUT" | grep -oE 'registry\.cloudflare\.com/[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+' | head -n1)
+          if [ -z "$IMAGE" ]; then
+            # Fallback: construct from account ID + tag
+            ACCOUNT_ID=$(npx wrangler whoami 2>/dev/null | grep -oE '[a-f0-9]{32}' | head -1)
+            if [ -n "$ACCOUNT_ID" ]; then
+              IMAGE="registry.cloudflare.com/${ACCOUNT_ID}/toque:${TAG}"
+              echo "Constructed image URI from account ID: $IMAGE"
+            fi
+          fi
           if [ -z "$IMAGE" ]; then
             echo "❌ Could not extract registry URI from wrangler output"
             exit 1
@@ -129,13 +139,32 @@ jobs:
         env:
           IMAGE: ${{ steps.resolve.outputs.image }}
         run: |
-          # Use Node to safely edit JSON instead of fragile sed
+          # Use the same char-by-char JSONC stripper as scripts/deploy.sh to
+          # safely handle // inside strings (e.g. https://) and trailing
+          # commas left by comment-only lines.
           node -e '
             const fs = require("fs");
             const path = "wrangler.jsonc";
             const raw = fs.readFileSync(path, "utf8");
-            // Strip JSONC comments for parsing, then write back as JSONC-friendly edit
-            const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+            let inString = false, escape = false, stripped = "";
+            for (let i = 0; i < raw.length; i++) {
+              const ch = raw[i], next = raw[i + 1];
+              if (escape) { stripped += ch; escape = false; continue; }
+              if (ch === "\\" && inString) { stripped += ch; escape = true; continue; }
+              if (ch === "\"") { inString = !inString; stripped += ch; continue; }
+              if (!inString && ch === "/" && next === "/") {
+                while (i < raw.length && raw[i] !== "\n") i++;
+                continue;
+              }
+              if (!inString && ch === "/" && next === "*") {
+                i += 2;
+                while (i < raw.length - 1 && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+                i++;
+                continue;
+              }
+              stripped += ch;
+            }
+            stripped = stripped.replace(/,(\s*[\]}])/g, "$1");
             const json = JSON.parse(stripped);
             if (!json.containers || !json.containers[0]) throw new Error("No container config found");
             json.containers[0].image = process.env.IMAGE;
