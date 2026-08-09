@@ -1327,7 +1327,7 @@ async function cmdSendVisa(args) {
   if (!groupId) {
     groupId = process.env.GROUP_ID || null;
   }
-  if (!groupId && canPrompt()) {
+  if (!groupId) {
     groupId = readStoredGroupId() || null;
   }
   if (typeof groupId === "string") groupId = groupId.trim();

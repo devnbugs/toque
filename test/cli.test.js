@@ -133,10 +133,22 @@ test("unknown named requests fail concisely without network access", () => {
 });
 
 test("send without a group ID fails safely outside an interactive terminal", () => {
-  const result = run(["send"]);
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /Group ID is required/);
-  assert.doesNotMatch(result.stderr, /at main|bin\/nusuk\.js:\d+/);
+  const directory = mkdtempSync(join(tmpdir(), "toque-cli-no-group-"));
+  try {
+    const result = run(["send"], {
+      cwd: directory,
+      env: {
+        AUTH_PATH: join(directory, "auth.json"),
+        CAPTCHA_PATH: join(directory, "captcha.json"),
+        ENTITY_CONFIG_PATH: join(directory, "entity.json"),
+      },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Group ID is required/);
+    assert.doesNotMatch(result.stderr, /at main|bin\/nusuk\.js:\d+/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("logout clears local auth, captcha, and entity state", () => {
