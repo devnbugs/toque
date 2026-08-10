@@ -199,6 +199,7 @@ function clearLocalState() {
     process.env.AUTH_PATH || "auth.json",
     process.env.CAPTCHA_PATH || "captcha.json",
     process.env.ENTITY_CONFIG_PATH || "entity.json",
+    process.env.PROFILE_PATH || "profile.json",
   ];
 
   for (const path of files) {
@@ -522,9 +523,53 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
 
 async function cmdLogout(args) {
   const cleared = clearLocalState();
-  console.log(`Cleared local auth and entity state.`);
-  console.log(`  files   : ${cleared.join(", ")}`);
+  console.log(`\n✓ Cleared local auth and entity state`);
+  console.log(`  files: ${cleared.join(", ")}`);
   return cleared;
+}
+
+async function cmdWhoami(args) {
+  // Show current entity info extracted from the JWT in auth.json
+  const authPath = process.env.AUTH_PATH || "auth.json";
+  let parsed = null;
+  try { parsed = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+  const token = parsed?.response?.data?.authInfo?.userToken;
+  if (!token) {
+    console.log("No auth token found. Run `nusuk login` or `nusuk login-auto` first.");
+    process.exitCode = 1;
+    return;
+  }
+  const jwt = parseJwt(token);
+  if (!jwt) {
+    console.log("Auth token is expired or invalid. Run `nusuk login-auto` to get a fresh token.");
+    process.exitCode = 1;
+    return;
+  }
+  const p = jwt.payload;
+  const authInfo = parsed?.response?.data?.authInfo || {};
+  const entityId = authInfo.entityId || p.defaultEntityId || p.entities?.[0]?.entityId;
+  const entityTypeId = authInfo.entityTypeId || p.defaultEntityTypeId || p.entities?.[0]?.entityTypeId;
+  const tokenTypeMap = { 2: "TEMP", 3: "AUTH", 4: "REFRESH", 5: "USER" };
+  const tokenTypeLabel = tokenTypeMap[p.tokenType] || p.tokenType;
+
+  console.log(`\n┌─ Current session`);
+  console.log(`│  user        ${p.sub || "unknown"}`);
+  console.log(`│  name        ${p.name || p.nameAr || "unknown"}`);
+  console.log(`│  userId      ${p.userId || p.userIdStr || "unknown"}`);
+  console.log(`│  userType    ${p.userType ?? "unknown"}`);
+  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (no entity claims — run verify-login)" : ""}`);
+  console.log(`│  entityId    ${entityId || "none"}`);
+  console.log(`│  entityType  ${entityTypeId || "none"}`);
+  if (p.entities?.length) {
+    console.log(`│  entities    ${p.entities.length} available:`);
+    for (const e of p.entities) {
+      console.log(`│    • ${e.entityId} (type ${e.entityTypeId})${e.entityNameAr ? ` ${e.entityNameAr}` : ""}${e.entityNameEn ? ` ${e.entityNameEn}` : ""}${e.activeEntityFlag ? " [active]" : ""}`);
+    }
+  }
+  console.log(`│  issued      ${new Date(p.iat * 1000).toISOString()}`);
+  console.log(`│  expires     ${new Date(p.exp * 1000).toISOString()}`);
+  console.log(`│  remaining   ${Math.round((p.exp * 1000 - Date.now()) / 60000)} min`);
+  console.log(`└─`);
 }
 
 async function cmdLogin(args) {
@@ -544,17 +589,19 @@ async function cmdLogin(args) {
     endpoint: getArg("--endpoint"),
     systemUserId,
   });
-  console.log(`Loading latest D1 context for system user ${systemUserId}...`);
+  console.log(`\n→ Loading D1 context for system user ${systemUserId}...`);
   const context = await worker.fetchUserContext(systemUserId);
   const result = saveContext(context, {
     type: getArg("--type") || "visa",
     worker,
   });
 
-  console.log(`  entity  : ${context.entityId}`);
-  console.log(`  auth    : ${result.token ? "valid JWT saved" : "not available"}`);
-  console.log(`  captcha : ${result.captcha ? "saved" : "not available"}`);
-  console.log(`  files   : ${result.authPath}, ${result.captchaPath}, ${result.entityPath}`);
+  console.log(`\n┌─ Login result`);
+  console.log(`│  ${result.token ? "✓" : "✗"} auth    ${result.token ? "valid JWT saved" : "not available"}`);
+  console.log(`│  ${result.captcha ? "✓" : "✗"} captcha ${result.captcha ? "saved" : "not available"}`);
+  console.log(`│  • entity  ${context.entityId}`);
+  console.log(`│  • files   ${result.authPath}, ${result.captchaPath}, ${result.entityPath}`);
+  console.log(`└─`);
   if (!result.token) process.exitCode = 1;
 }
 
@@ -641,7 +688,12 @@ async function cmdAutoLogin(args) {
     if (res.timing) console.log(`  timing   :`, res.timing);
 
     // Step 4: Save the JWT token if login succeeded
-    const token = res.json?.response?.data?.authInfo?.userToken;
+    // The login response has two paths:
+    //   - trustedDevice=true:  response.data.authInfo.{token,userToken,refreshToken,permsToken}
+    //   - trustedDevice=false: response.data.token (temp), authInfo=null, OTP required
+    const authInfo = res.json?.response?.data?.authInfo;
+    const trustedDevice = res.json?.response?.data?.trustedDevice;
+    const token = authInfo?.userToken || authInfo?.token || res.json?.response?.data?.token;
     if (token) {
       const authPath = process.env.AUTH_PATH || "auth.json";
       let existing = {};
@@ -650,17 +702,44 @@ async function cmdAutoLogin(args) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
-      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      // Save all tokens from the response for completeness
+      if (authInfo?.refreshToken) existing.response.data.authInfo.refreshToken = authInfo.refreshToken;
+      if (authInfo?.permsToken) existing.response.data.authInfo.permsToken = authInfo.permsToken;
+      if (authInfo?.token) existing.response.data.authInfo.token = authInfo.token;
+      // Extract entity from JWT claims (authInfo.entityId is null in login response)
+      const jwt = parseJwt(token);
+      const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
-      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
       if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
       console.log(`  auth     : valid JWT saved to ${authPath}`);
-      if (entityId) console.log(`  entity   : ${entityId}`);
+      if (entityId) console.log(`  entity   : ${entityId}${entityTypeId ? ` (type ${entityTypeId})` : ""}`);
+      if (trustedDevice === false) console.log(`  otp      : required (use verify-login with transaction ID)`);
     } else {
       console.log(`  auth     : no token in response`);
       process.exitCode = 1;
     }
+
+    // Step 5: Save the login profile for later token refresh
+    // Stores the input credentials and config so `nusuk refresh-token` can
+    // re-authenticate or refresh without re-entering anything.
+    const profilePath = process.env.PROFILE_PATH || "profile.json";
+    const profile = {
+      username,
+      password,
+      aesKey: aesKey || undefined,
+      xChannel: xChannel || undefined,
+      trustedDeviceToken: trustedDeviceToken || undefined,
+      captcha: { provider, siteKey, pageUrl, captchaVersion, captchaType, enterprise },
+      lastLoginAt: new Date().toISOString(),
+      lastLoginStatus: token ? "ok" : "failed",
+      trustedDevice: trustedDevice ?? null,
+      transactionId: res.json?.response?.data?.transactionId || null,
+    };
+    writePrivateJson(profilePath, profile);
+    console.log(`  profile  : saved to ${profilePath}`);
+
     if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
     else console.log(`  body     :`, res.body);
   } finally {
@@ -704,7 +783,12 @@ async function cmdVerifyLogin(args) {
     console.log(`  status      : ${res.status}`);
     if (res.timing) console.log(`  timing      :`, res.timing);
 
-    const token = res.json?.response?.data?.authInfo?.userToken || res.json?.response?.data?.token;
+    // The verifyLogin response has the full AUTH_TOKEN with entity claims.
+    // Response structure: response.data.{token, userToken, refreshToken, permsToken}
+    // or response.data.authInfo.{userToken, refreshToken, permsToken}
+    const data = res.json?.response?.data;
+    const authInfo = data?.authInfo || data;
+    const token = authInfo?.userToken || authInfo?.token || data?.token;
     if (token) {
       const authPath = process.env.AUTH_PATH || "auth.json";
       let existing = {};
@@ -713,22 +797,114 @@ async function cmdVerifyLogin(args) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
-      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      // Save all tokens from the response for completeness
+      if (authInfo?.refreshToken) existing.response.data.authInfo.refreshToken = authInfo.refreshToken;
+      if (authInfo?.permsToken) existing.response.data.authInfo.permsToken = authInfo.permsToken;
+      if (authInfo?.token) existing.response.data.authInfo.token = authInfo.token;
+      // Extract entity from JWT claims (the AUTH_TOKEN has defaultEntityId/entities)
+      const jwt = parseJwt(token);
+      const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
-      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
       if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
       console.log(`  auth        : valid JWT saved to ${authPath}`);
-      if (entityId) console.log(`  entity      : ${entityId}`);
+      if (entityId) console.log(`  entity      : ${entityId}${entityTypeId ? ` (type ${entityTypeId})` : ""}`);
+      // Show entity count if multiple entities available
+      if (jwt?.payload?.entities?.length > 1) {
+        console.log(`  entities    : ${jwt.payload.entities.length} available`);
+      }
     } else {
       console.log(`  auth        : no token in response`);
       process.exitCode = 1;
     }
+
+    // Update profile with verify status
+    const profilePath = process.env.PROFILE_PATH || "profile.json";
+    try {
+      const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+      profile.lastVerifyAt = new Date().toISOString();
+      profile.lastVerifyStatus = token ? "ok" : "failed";
+      writePrivateJson(profilePath, profile);
+    } catch { /* profile doesn't exist yet — skip */ }
+
     if (res.json) console.log(`  body        :`, JSON.stringify(res.json, null, 2));
     else console.log(`  body        :`, res.body);
   } finally {
     await nusuk.close();
   }
+}
+
+async function cmdRefreshToken(args) {
+  // Refresh the auth token using the stored refresh token from auth.json.
+  // If no refresh token is available, falls back to a full re-login using
+  // the saved profile (profile.json from a previous `login-auto`).
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const authPath = process.env.AUTH_PATH || "auth.json";
+  const profilePath = process.env.PROFILE_PATH || "profile.json";
+
+  // Try refresh token first
+  let existing = {};
+  try { existing = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+  const refreshToken = existing?.response?.data?.authInfo?.refreshToken;
+
+  if (refreshToken) {
+    console.log(`Refreshing token via /eh/public/authentication/refreshToken...`);
+    const nusuk = new Nusuk({ referer: "https://masar.nusuk.sa/pub/login" });
+    await nusuk.init();
+    try {
+      const res = await nusuk.request("/eh/public/authentication/refreshToken", {
+        method: "POST",
+        payload: { refreshToken },
+      });
+      console.log(`  status   : ${res.status}`);
+      if (res.timing) console.log(`  timing   :`, res.timing);
+
+      const data = res.json?.response?.data;
+      const newToken = data?.userToken || data?.token;
+      if (newToken) {
+        existing.response.data.authInfo.userToken = newToken;
+        if (data?.refreshToken) existing.response.data.authInfo.refreshToken = data.refreshToken;
+        if (data?.permsToken) existing.response.data.authInfo.permsToken = data.permsToken;
+        if (data?.token) existing.response.data.authInfo.token = data.token;
+        // Re-extract entity from the new JWT
+        const jwt = parseJwt(newToken);
+        const entityId = jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+        const entityTypeId = jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+        if (entityId) existing.response.data.authInfo.entityId = entityId;
+        if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+        writePrivateJson(authPath, existing);
+        console.log(`  auth     : valid JWT saved to ${authPath}`);
+        if (entityId) console.log(`  entity   : ${entityId}${entityTypeId ? ` (type ${entityTypeId})` : ""}`);
+        if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
+        return;
+      }
+      console.log(`  auth     : no token in refresh response`);
+      if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
+    } finally {
+      await nusuk.close();
+    }
+  }
+
+  // No refresh token — fall back to full re-login using saved profile
+  console.log(`No refresh token found in auth.json.`);
+  let profile = null;
+  try { profile = JSON.parse(readFileSync(profilePath, "utf8")); } catch { /* ignore */ }
+  if (!profile || !profile.username || !profile.password) {
+    throw new Error(`No refresh token and no saved profile. Run "nusuk login-auto" first to create a profile.`);
+  }
+  console.log(`Falling back to full re-login using saved profile (${profile.username})...`);
+  const reloginArgs = ["--username", profile.username, "--password", profile.password];
+  if (profile.aesKey) reloginArgs.push("--aes-key", profile.aesKey);
+  if (profile.xChannel) reloginArgs.push("--x-channel", profile.xChannel);
+  if (profile.trustedDeviceToken) reloginArgs.push("--trusted-device-token", profile.trustedDeviceToken);
+  if (profile.captcha?.provider === "capmonster") reloginArgs.push("--capmonster");
+  if (profile.captcha?.siteKey) reloginArgs.push("--site-key", profile.captcha.siteKey);
+  if (profile.captcha?.pageUrl) reloginArgs.push("--page-url", profile.captcha.pageUrl);
+  await cmdAutoLogin(reloginArgs);
 }
 
 async function cmdPull(args) {
@@ -748,13 +924,15 @@ async function cmdPull(args) {
 
   const { token, captcha, authPath, captchaPath, entityId: tokenEntityId } = await pullCreds({ entityId, type, endpoint });
 
-  if (!token) console.error("  Warning: no auth token found in worker records");
-  if (!captcha) console.error(`  Warning: no ${type} captcha found in worker`);
+  console.log(`\n┌─ Pull from worker (entity ${entityId}, type ${type})`);
+  if (!token) console.log(`│  ⚠ no auth token found in worker records`);
+  if (!captcha) console.log(`│  ⚠ no ${type} captcha found in worker`);
 
-  console.log(`\n  auth    -> ${authPath}${token ? "" : " (skipped — none found)"}`);
-  console.log(`  captcha -> ${captchaPath}${captcha ? "" : " (skipped — none found)"}`);
-  if (token) console.log(`  token   : ${token.slice(0, 28)}... (entity ${tokenEntityId})`);
-  if (captcha) console.log(`  captcha : ${captcha.slice(0, 28)}...`);
+  console.log(`│  ${token ? "✓" : "✗"} auth    → ${authPath}${token ? "" : " (skipped — none found)"}`);
+  console.log(`│  ${captcha ? "✓" : "✗"} captcha → ${captchaPath}${captcha ? "" : " (skipped — none found)"}`);
+  if (token) console.log(`│  • token   ${token.slice(0, 28)}... (entity ${tokenEntityId})`);
+  if (captcha) console.log(`│  • captcha ${captcha.slice(0, 28)}...`);
+  console.log(`└─`);
 
   if (!token && !captcha) process.exitCode = 1;
 }
@@ -842,13 +1020,14 @@ async function cmdBench(args) {
   await nusuk.init();
 
   try {
-    console.log(`Sending ${count} test requests...\n`);
+    console.log(`\n┌─ Benchmark: ${count} requests to ${nusuk.baseUrl}\n│`);
     const samples = [];
     for (let i = 0; i < count; i++) {
       const res = await nusuk.request("/manifest.json", { cacheBust: true });
       const t = res.timing;
       samples.push(t);
-      console.log(`  req ${i + 1}: total=${ms(t.total)}  ttfb=${ms(t.ttfb ?? "?")}  status=${res.status}`);
+      const statusIcon = res.status === 200 ? "✓" : "✗";
+      console.log(`│  ${statusIcon} req ${String(i + 1).padStart(2)}  total=${ms(t.total).padStart(6)}  ttfb=${ms(t.ttfb ?? "?").padStart(6)}  status=${res.status}`);
     }
 
     const totals = samples.map((s) => s.total);
@@ -857,21 +1036,21 @@ async function cmdBench(args) {
     const min = (arr) => Math.min(...arr);
     const max = (arr) => Math.max(...arr);
 
-    console.log(`\n--- Latency Stats ---`);
-    console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(max(totals))}`);
+    console.log(`│\n├─ Latency Summary ───────────────────────────────────────`);
+    console.log(`│  total RTT   min=${ms(min(totals)).padStart(6)}  avg=${ms(avg(totals)).padStart(6)}  max=${ms(max(totals)).padStart(6)}`);
     if (ttfbVals.length) {
-      console.log(`  ttfb       : min=${ms(min(ttfbVals))}  avg=${ms(avg(ttfbVals))}  max=${ms(max(ttfbVals))}  (${ttfbVals.length}/${count} samples)`);
+      console.log(`│  ttfb        min=${ms(min(ttfbVals)).padStart(6)}  avg=${ms(avg(ttfbVals)).padStart(6)}  max=${ms(max(ttfbVals)).padStart(6)}  (${ttfbVals.length}/${count} samples)`);
       const minTtfb = min(ttfbVals);
       const avgTtfb = avg(ttfbVals);
-      console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
+      console.log(`│  server proc ${ms(avgTtfb - minTtfb).padStart(6)}  (avg ttfb - min ttfb)`);
       const netOneWay = Math.round(minTtfb / 2);
-      console.log(`  net 1-way  : ${ms(netOneWay)}  (min ttfb ÷ 2)  <-- request delivery`);
+      console.log(`│  net 1-way   ${ms(netOneWay).padStart(6)}  (min ttfb ÷ 2)  ← request delivery`);
       const oneway = netOneWay || Math.round(avg(totals) / 2);
-      console.log(`  one-way ~  : ${ms(oneway)}`);
+      console.log(`│  one-way ~   ${ms(oneway).padStart(6)}`);
     } else {
-      console.log(`  ttfb       : (no resource timing entries — enable cacheBust or check browser)`);
+      console.log(`│  ttfb        (no resource timing entries — enable cacheBust or check browser)`);
       const oneway = Math.round(avg(totals) / 2);
-      console.log(`  one-way ~  : ${ms(oneway)}`);
+      console.log(`│  one-way ~   ${ms(oneway).padStart(6)}`);
     }
   } finally {
     await nusuk.close();
@@ -923,10 +1102,11 @@ async function cmdReq(args) {
     console.log(JSON.stringify(res.json, null, 2));
     return;
   }
-  console.log(`status: ${res.status}`);
-  if (res.timing) console.log(`timing:`, res.timing);
-  if (res.json) console.log(`body:`, JSON.stringify(res.json, null, 2));
-  else console.log(`body:`, res.body);
+  const statusIcon = res.ok ? "✓" : "✗";
+  console.log(`\n${statusIcon} ${method} ${path} → ${res.status}`);
+  if (res.timing) console.log(`⏱  total=${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
+  if (res.json) console.log(`\n${JSON.stringify(res.json, null, 2)}`);
+  else console.log(`\n${res.body}`);
 }
 
 async function executeRequest({ path, method = "GET", payload, useCaptcha = false, captchaType = "visa" }) {
@@ -1379,19 +1559,19 @@ async function cmdSchedule(args) {
     const quality = connectionQuality(sdTtfb);
     const driftRange = sdTtfb > 0 ? `\u00b1${sdTtfb}ms` : "\u22645ms";
 
-    console.log(`\n--- Connection Quality ---`);
-    console.log(`  stability    : ${quality.icon} ${quality.label}  (stddev ${ms(sdTtfb)}, drift ~${driftRange})`);
-    console.log(`  min ttfb     : ${ms(minTtfb)}`);
-    console.log(`  avg ttfb     : ${ms(avgRealTtfb)}`);
-    console.log(`  weighted 1-way: ${ms(netOneWay)}  (min\xd70.6 + avg\xd70.4 \xf7 2)`);
-    console.log(`  jitter buffer : ${ms(jitterBuffer)}`);
-    console.log(`\n--- Schedule ---`);
-    console.log(`  deliver to server: ${formatTime(target)}`);
-    console.log(`  send at          : ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
+    console.log(`\n┌─ Connection Quality ${quality.icon} ${quality.label}`);
+    console.log(`│  • stability     stddev ${ms(sdTtfb)}, drift ~${driftRange}`);
+    console.log(`│  ⏱ min ttfb      ${ms(minTtfb)}`);
+    console.log(`│  ⏱ avg ttfb      ${ms(avgRealTtfb)}`);
+    console.log(`│  ⏱ weighted 1-way ${ms(netOneWay)}  (min×0.6 + avg×0.4 ÷ 2)`);
+    console.log(`│  ⏱ jitter buffer ${ms(jitterBuffer)}`);
+    console.log(`│\n├─ Schedule`);
+    console.log(`│  ⏱ deliver to server  ${formatTime(target)}`);
+    console.log(`│  ⏱ send at            ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
 
     const waitMs = sendAt.getTime() - Date.now();
     if (waitMs > 0) {
-      console.log(`  waiting ${ms(waitMs)}...`);
+      console.log(`│\n│  ⏱ waiting ${ms(waitMs)}...`);
 
       // Phase 3: mid-calibration refresh at 60% of wait time
       if (waitMs > 5000) {
@@ -1407,10 +1587,10 @@ async function cmdSchedule(args) {
           const adjustedAhead = refreshOneWay + jitterBuffer;
           const adjustedSend = new Date(target.getTime() - adjustedAhead);
           if (adjustedSend.getTime() < sendAt.getTime() + 200 && adjustedSend.getTime() > Date.now()) {
-            console.log(`\n  \u21aa refresh 1-way: ${ms(refreshOneWay)}  -> adjusting send time`);
+            console.log(`│  ↳ refresh 1-way: ${ms(refreshOneWay)}  → adjusting send time`);
             sendAt.setTime(adjustedSend.getTime());
           } else {
-            console.log(`\n  \u21aa refresh 1-way: ${ms(refreshOneWay)}  (keep original schedule)`);
+            console.log(`│  ↳ refresh 1-way: ${ms(refreshOneWay)}  (keep original schedule)`);
           }
         }
       }
@@ -1424,19 +1604,22 @@ async function cmdSchedule(args) {
       const serverArrival = sendActual + netOneWay;
       const drift = serverArrival - target.getTime();
 
-      console.log(`\n--- Result ---`);
-      console.log(`  sent at          : ${formatTime(new Date(sendActual))}`);
-      console.log(`  ~server arrival  : ${formatTime(new Date(serverArrival))}`);
-      console.log(`  target           : ${formatTime(target)}`);
-      console.log(`  drift            : ${drift >= 0 ? "+" : ""}${drift}ms`);
-      console.log(`  response received: ${formatTime(new Date(responseReceived))}`);
-      console.log(`  response status  : ${res.status}`);
+      const statusIcon = res.status === 200 ? "✓" : "✗";
+      console.log(`│\n├─ Result ${statusIcon}`);
+      console.log(`│  ⏱ sent at          ${formatTime(new Date(sendActual))}`);
+      console.log(`│  ⏱ ~server arrival  ${formatTime(new Date(serverArrival))}`);
+      console.log(`│  ⏱ target           ${formatTime(target)}`);
+      console.log(`│  ⏱ drift            ${drift >= 0 ? "+" : ""}${drift}ms`);
+      console.log(`│  ⬇ response received ${formatTime(new Date(responseReceived))}`);
+      console.log(`│  ${statusIcon} response status  ${res.status}`);
       if (res.timing) {
-        console.log(`  actual ttfb      : ${ms(res.timing.total)}`);
+        console.log(`│  ⏱ actual ttfb      ${ms(res.timing.total)}`);
       }
-      if (res.json) console.log(`  response:`, JSON.stringify(res.json, null, 2).slice(0, 600));
+      if (res.json) console.log(`│  • response         ${JSON.stringify(res.json, null, 2).slice(0, 600).split("\n").join("\n│  ")}`);
+      console.log(`└─`);
     } else {
-      console.log(`  target ${formatTime(target)} is too close or in the past.`);
+      console.log(`│  ⚠ target ${formatTime(target)} is too close or in the past.`);
+      console.log(`└─`);
     }
   } finally {
     await nusuk.close();
@@ -1655,15 +1838,17 @@ async function cmdSendVisa(args) {
     let schedule = null;
     if (target) {
       schedule = await warmVisaConnection(nusuk, target);
-      console.log(`  target           : ${formatTime(target)}`);
-      console.log(`  estimated one-way: ${ms(schedule.oneWayMs)}`);
-      console.log(`  send at          : ${formatTime(schedule.sendAt)} (${ms(schedule.sendAheadMs)} ahead)`);
+      console.log(`\n┌─ Schedule`);
+      console.log(`│  ⏱ target           ${formatTime(target)}`);
+      console.log(`│  ⏱ estimated 1-way  ${ms(schedule.oneWayMs)}`);
+      console.log(`│  ⏱ send at          ${formatTime(schedule.sendAt)} (${ms(schedule.sendAheadMs)} ahead)`);
+      console.log(`└─`);
     }
 
     const actualSendAt = target ? schedule.sendAt.getTime() : sendAt;
     const secondWait = actualSendAt - Date.now();
     if (secondWait > 0) {
-      console.log(`  waiting ${ms(secondWait)} until execute (${formatTime(new Date(actualSendAt))})...`);
+      console.log(`\n⏱ waiting ${ms(secondWait)} until execute (${formatTime(new Date(actualSendAt))})...`);
       await new Promise((r) => setTimeout(r, secondWait));
     }
 
@@ -1678,13 +1863,13 @@ async function cmdSendVisa(args) {
       payload,
     };
 
-    console.log(`\n--- Request Preview ---`);
-    console.log(`  method  : ${requestPreview.method}`);
-    console.log(`  url     : ${requestPreview.url}`);
-    console.log(`  headers :`, JSON.stringify(requestPreview.headers, null, 2));
-    console.log(`  payload :`, JSON.stringify(requestPreview.payload, null, 2));
-    console.log(`  curl    :`);
-    console.log(formatCurlPreview(requestPreview.url, requestPreview.headers, requestPreview.payload));
+    console.log(`\n┌─ Request Preview ────────────────────────────────────────`);
+    console.log(`│  ➤ ${requestPreview.method} ${requestPreview.url}`);
+    console.log(`│  headers: ${JSON.stringify(requestPreview.headers, null, 2).split("\n").join("\n│  ")}`);
+    console.log(`│  payload: ${JSON.stringify(requestPreview.payload, null, 2).split("\n").join("\n│  ")}`);
+    console.log(`│  curl:`);
+    console.log(`│  ${formatCurlPreview(requestPreview.url, requestPreview.headers, requestPreview.payload).split("\n").join("\n│  ")}`);
+    console.log(`└─`);
 
     const res = await nusuk.request(VISA_PATH, { method: "POST", payload });
     const responseReceived = Date.now();
@@ -1694,15 +1879,17 @@ async function cmdSendVisa(args) {
       response: res,
     });
 
-    console.log(`\n--- Result ---`);
-    console.log(`  sent at          : ${formatTime(timing.sendAt)}`);
-    console.log(`  response received: ${formatTime(timing.responseReceivedAt)}`);
-    console.log(`  elapsed          : ${ms(timing.elapsedMs)}`);
-    console.log(`  response date    : ${timing.serverDateHeader || "(none)"}`);
-    console.log(`  status           : ${res.status}`);
-    if (res.timing) console.log(`  timing           : ${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
-    if (res.json) console.log(`  response         :`, JSON.stringify(res.json, null, 2).slice(0, 600));
-    else console.log(`  body             :`, String(res.body).slice(0, 600));
+    const statusIcon = res.status === 200 ? "✓" : "✗";
+    console.log(`\n┌─ Result ${statusIcon}`);
+    console.log(`│  ⏱ sent at          ${formatTime(timing.sendAt)}`);
+    console.log(`│  ⬇ response received ${formatTime(timing.responseReceivedAt)}`);
+    console.log(`│  ⏱ elapsed          ${ms(timing.elapsedMs)}`);
+    console.log(`│  • response date    ${timing.serverDateHeader || "(none)"}`);
+    console.log(`│  ${statusIcon} status            ${res.status}`);
+    if (res.timing) console.log(`│  ⏱ timing           total=${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
+    if (res.json) console.log(`│  • response         ${JSON.stringify(res.json, null, 2).slice(0, 600).split("\n").join("\n│  ")}`);
+    else console.log(`│  • body             ${String(res.body).slice(0, 600)}`);
+    console.log(`└─`);
 
     if (res.status !== 200) process.exitCode = 1;
   } finally {
@@ -1745,8 +1932,10 @@ Usage: nusuk <command> [options]
 Common tasks:
   init                  Create ignored local config files after a fresh clone
   login                 Install the latest user credentials
+  whoami                Show current session entity info from JWT
   login-auto            Auto-login via captcha solver and save JWT
   verify-login          Verify OTP after auto-login (requires transaction ID)
+  refresh-token         Refresh the JWT using the stored refresh token or saved profile
   logout                Clear local auth, captcha, and entity state
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
@@ -1768,8 +1957,10 @@ Help:
 
 Examples:
   nusuk login
+  nusuk whoami
   nusuk login-auto --username user@email.com --password pass123
   nusuk verify-login --transaction-id <id> --otp 1234
+  nusuk refresh-token
   nusuk info
   nusuk send 12345
   nusuk api verify-subscription
@@ -1895,12 +2086,19 @@ async function main() {
     case "login":
       await cmdLogin(args);
       break;
+    case "whoami":
+      await cmdWhoami(args);
+      break;
     case "login-auto":
     case "autologin":
       await cmdAutoLogin(args);
       break;
     case "verify-login":
       await cmdVerifyLogin(args);
+      break;
+    case "refresh-token":
+    case "refresh":
+      await cmdRefreshToken(args);
       break;
     case "workflow":
       await cmdWorkflow(args);

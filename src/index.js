@@ -10,6 +10,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import { env } from "cloudflare:workers";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { jsonResponse } from "./utils.js";
+import { log } from "./log.js";
 
 export class ToqueContainer extends Container {
   defaultPort = 8080;
@@ -39,20 +40,17 @@ export class ToqueContainer extends Container {
   };
 
   onStart() {
-    console.log(JSON.stringify({ message: "toque container started" }));
+    log.info("container.started", "Toque container started");
   }
 
   onStop() {
-    console.log(JSON.stringify({ message: "toque container stopped" }));
+    log.info("container.stopped", "Toque container stopped");
   }
 
   onError(error) {
-    console.error(
-      JSON.stringify({
-        message: "toque container error",
-        error: error instanceof Error ? error.message : String(error),
-      })
-    );
+    log.error("container.error", "Toque container error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -151,13 +149,10 @@ async function authenticate(request, url) {
       await jwtVerify(accessJwt, jwks, verifyOptions);
       return null; // valid Access token
     } catch (err) {
-      console.error(
-        JSON.stringify({
-          message: "invalid Cloudflare Access token",
-          path: url.pathname,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      );
+      log.warn("access.token.invalid", "Invalid Cloudflare Access token", {
+        path: url.pathname,
+        error: err instanceof Error ? err.message : String(err),
+      });
       return jsonResponse(403, {
         ok: false,
         error: "Invalid Cloudflare Access token",
@@ -548,25 +543,19 @@ export default {
       if (!response.ok) {
         ctx.waitUntil(
           Promise.resolve().then(() =>
-            console.error(
-              JSON.stringify({
-                message: "container proxy returned non-ok status",
-                path: url.pathname,
-                status: response.status,
-              })
-            )
+            log.warn("proxy.non_ok", "Container proxy returned non-ok status", {
+              path: url.pathname,
+              status: response.status,
+            })
           )
         );
       }
       return response;
     } catch (err) {
-      console.error(
-        JSON.stringify({
-          message: "container proxy failed",
-          path: url.pathname,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      );
+      log.error("proxy.failed", "Container proxy failed", {
+        path: url.pathname,
+        error: err instanceof Error ? err.message : String(err),
+      });
       return jsonResponse(500, { ok: false, error: err.message });
     }
   },

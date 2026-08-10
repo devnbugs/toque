@@ -67,6 +67,16 @@ COPY . .
 RUN groupadd -r toque && useradd -r -g toque -m -s /bin/bash toque \
   && cp -r /root/.cloakbrowser /home/toque/.cloakbrowser 2>/dev/null || true \
   && chown -R toque:toque /app /home/toque
+
+# Put the nusuk CLI and local node_modules/.bin on PATH for both the server
+# process (ENV) and SSH sessions (/etc/profile.d — sourced by /bin/sh login
+# shells). Also create a `nusuk` symlink so the command works without the
+# .js extension (npm ci doesn't create bin links for the package itself).
+RUN ln -s /app/bin/nusuk.js /app/bin/nusuk \
+  && echo 'export PATH="/app/bin:/app/node_modules/.bin:$PATH"' > /etc/profile.d/toque-path.sh \
+  && chmod 755 /etc/profile.d/toque-path.sh
+ENV PATH="/app/bin:/app/node_modules/.bin:${PATH}"
+
 USER toque
 
 # The container exposes an HTTP server on PORT (default 8080)
