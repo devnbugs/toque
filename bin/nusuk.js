@@ -199,6 +199,7 @@ function clearLocalState() {
     process.env.AUTH_PATH || "auth.json",
     process.env.CAPTCHA_PATH || "captcha.json",
     process.env.ENTITY_CONFIG_PATH || "entity.json",
+    process.env.PROFILE_PATH || "profile.json",
   ];
 
   for (const path of files) {
@@ -527,6 +528,50 @@ async function cmdLogout(args) {
   return cleared;
 }
 
+async function cmdWhoami(args) {
+  // Show current entity info extracted from the JWT in auth.json
+  const authPath = process.env.AUTH_PATH || "auth.json";
+  let parsed = null;
+  try { parsed = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+  const token = parsed?.response?.data?.authInfo?.userToken;
+  if (!token) {
+    console.log("No auth token found. Run `nusuk login` or `nusuk login-auto` first.");
+    process.exitCode = 1;
+    return;
+  }
+  const jwt = parseJwt(token);
+  if (!jwt) {
+    console.log("Auth token is expired or invalid. Run `nusuk login-auto` to get a fresh token.");
+    process.exitCode = 1;
+    return;
+  }
+  const p = jwt.payload;
+  const authInfo = parsed?.response?.data?.authInfo || {};
+  const entityId = authInfo.entityId || p.defaultEntityId || p.entities?.[0]?.entityId;
+  const entityTypeId = authInfo.entityTypeId || p.defaultEntityTypeId || p.entities?.[0]?.entityTypeId;
+  const tokenTypeMap = { 2: "TEMP", 3: "AUTH", 4: "REFRESH", 5: "USER" };
+  const tokenTypeLabel = tokenTypeMap[p.tokenType] || p.tokenType;
+
+  console.log(`\n┌─ Current session`);
+  console.log(`│  user        ${p.sub || "unknown"}`);
+  console.log(`│  name        ${p.name || p.nameAr || "unknown"}`);
+  console.log(`│  userId      ${p.userId || p.userIdStr || "unknown"}`);
+  console.log(`│  userType    ${p.userType ?? "unknown"}`);
+  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (no entity claims — run verify-login)" : ""}`);
+  console.log(`│  entityId    ${entityId || "none"}`);
+  console.log(`│  entityType  ${entityTypeId || "none"}`);
+  if (p.entities?.length) {
+    console.log(`│  entities    ${p.entities.length} available:`);
+    for (const e of p.entities) {
+      console.log(`│    • ${e.entityId} (type ${e.entityTypeId})${e.entityNameAr ? ` ${e.entityNameAr}` : ""}${e.entityNameEn ? ` ${e.entityNameEn}` : ""}${e.activeEntityFlag ? " [active]" : ""}`);
+    }
+  }
+  console.log(`│  issued      ${new Date(p.iat * 1000).toISOString()}`);
+  console.log(`│  expires     ${new Date(p.exp * 1000).toISOString()}`);
+  console.log(`│  remaining   ${Math.round((p.exp * 1000 - Date.now()) / 60000)} min`);
+  console.log(`└─`);
+}
+
 async function cmdLogin(args) {
   const getArg = (flag) => {
     const i = args.indexOf(flag);
@@ -643,7 +688,12 @@ async function cmdAutoLogin(args) {
     if (res.timing) console.log(`  timing   :`, res.timing);
 
     // Step 4: Save the JWT token if login succeeded
-    const token = res.json?.response?.data?.authInfo?.userToken;
+    // The login response has two paths:
+    //   - trustedDevice=true:  response.data.authInfo.{token,userToken,refreshToken,permsToken}
+    //   - trustedDevice=false: response.data.token (temp), authInfo=null, OTP required
+    const authInfo = res.json?.response?.data?.authInfo;
+    const trustedDevice = res.json?.response?.data?.trustedDevice;
+    const token = authInfo?.userToken || authInfo?.token || res.json?.response?.data?.token;
     if (token) {
       const authPath = process.env.AUTH_PATH || "auth.json";
       let existing = {};
@@ -652,17 +702,44 @@ async function cmdAutoLogin(args) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
-      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      // Save all tokens from the response for completeness
+      if (authInfo?.refreshToken) existing.response.data.authInfo.refreshToken = authInfo.refreshToken;
+      if (authInfo?.permsToken) existing.response.data.authInfo.permsToken = authInfo.permsToken;
+      if (authInfo?.token) existing.response.data.authInfo.token = authInfo.token;
+      // Extract entity from JWT claims (authInfo.entityId is null in login response)
+      const jwt = parseJwt(token);
+      const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
-      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
       if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
       console.log(`  auth     : valid JWT saved to ${authPath}`);
-      if (entityId) console.log(`  entity   : ${entityId}`);
+      if (entityId) console.log(`  entity   : ${entityId}${entityTypeId ? ` (type ${entityTypeId})` : ""}`);
+      if (trustedDevice === false) console.log(`  otp      : required (use verify-login with transaction ID)`);
     } else {
       console.log(`  auth     : no token in response`);
       process.exitCode = 1;
     }
+
+    // Step 5: Save the login profile for later token refresh
+    // Stores the input credentials and config so `nusuk refresh-token` can
+    // re-authenticate or refresh without re-entering anything.
+    const profilePath = process.env.PROFILE_PATH || "profile.json";
+    const profile = {
+      username,
+      password,
+      aesKey: aesKey || undefined,
+      xChannel: xChannel || undefined,
+      trustedDeviceToken: trustedDeviceToken || undefined,
+      captcha: { provider, siteKey, pageUrl, captchaVersion, captchaType, enterprise },
+      lastLoginAt: new Date().toISOString(),
+      lastLoginStatus: token ? "ok" : "failed",
+      trustedDevice: trustedDevice ?? null,
+      transactionId: res.json?.response?.data?.transactionId || null,
+    };
+    writePrivateJson(profilePath, profile);
+    console.log(`  profile  : saved to ${profilePath}`);
+
     if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
     else console.log(`  body     :`, res.body);
   } finally {
@@ -706,7 +783,12 @@ async function cmdVerifyLogin(args) {
     console.log(`  status      : ${res.status}`);
     if (res.timing) console.log(`  timing      :`, res.timing);
 
-    const token = res.json?.response?.data?.authInfo?.userToken || res.json?.response?.data?.token;
+    // The verifyLogin response has the full AUTH_TOKEN with entity claims.
+    // Response structure: response.data.{token, userToken, refreshToken, permsToken}
+    // or response.data.authInfo.{userToken, refreshToken, permsToken}
+    const data = res.json?.response?.data;
+    const authInfo = data?.authInfo || data;
+    const token = authInfo?.userToken || authInfo?.token || data?.token;
     if (token) {
       const authPath = process.env.AUTH_PATH || "auth.json";
       let existing = {};
@@ -715,22 +797,114 @@ async function cmdVerifyLogin(args) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
-      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      // Save all tokens from the response for completeness
+      if (authInfo?.refreshToken) existing.response.data.authInfo.refreshToken = authInfo.refreshToken;
+      if (authInfo?.permsToken) existing.response.data.authInfo.permsToken = authInfo.permsToken;
+      if (authInfo?.token) existing.response.data.authInfo.token = authInfo.token;
+      // Extract entity from JWT claims (the AUTH_TOKEN has defaultEntityId/entities)
+      const jwt = parseJwt(token);
+      const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
-      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
       if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
       console.log(`  auth        : valid JWT saved to ${authPath}`);
-      if (entityId) console.log(`  entity      : ${entityId}`);
+      if (entityId) console.log(`  entity      : ${entityId}${entityTypeId ? ` (type ${entityTypeId})` : ""}`);
+      // Show entity count if multiple entities available
+      if (jwt?.payload?.entities?.length > 1) {
+        console.log(`  entities    : ${jwt.payload.entities.length} available`);
+      }
     } else {
       console.log(`  auth        : no token in response`);
       process.exitCode = 1;
     }
+
+    // Update profile with verify status
+    const profilePath = process.env.PROFILE_PATH || "profile.json";
+    try {
+      const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+      profile.lastVerifyAt = new Date().toISOString();
+      profile.lastVerifyStatus = token ? "ok" : "failed";
+      writePrivateJson(profilePath, profile);
+    } catch { /* profile doesn't exist yet — skip */ }
+
     if (res.json) console.log(`  body        :`, JSON.stringify(res.json, null, 2));
     else console.log(`  body        :`, res.body);
   } finally {
     await nusuk.close();
   }
+}
+
+async function cmdRefreshToken(args) {
+  // Refresh the auth token using the stored refresh token from auth.json.
+  // If no refresh token is available, falls back to a full re-login using
+  // the saved profile (profile.json from a previous `login-auto`).
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const authPath = process.env.AUTH_PATH || "auth.json";
+  const profilePath = process.env.PROFILE_PATH || "profile.json";
+
+  // Try refresh token first
+  let existing = {};
+  try { existing = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+  const refreshToken = existing?.response?.data?.authInfo?.refreshToken;
+
+  if (refreshToken) {
+    console.log(`Refreshing token via /eh/public/authentication/refreshToken...`);
+    const nusuk = new Nusuk({ referer: "https://masar.nusuk.sa/pub/login" });
+    await nusuk.init();
+    try {
+      const res = await nusuk.request("/eh/public/authentication/refreshToken", {
+        method: "POST",
+        payload: { refreshToken },
+      });
+      console.log(`  status   : ${res.status}`);
+      if (res.timing) console.log(`  timing   :`, res.timing);
+
+      const data = res.json?.response?.data;
+      const newToken = data?.userToken || data?.token;
+      if (newToken) {
+        existing.response.data.authInfo.userToken = newToken;
+        if (data?.refreshToken) existing.response.data.authInfo.refreshToken = data.refreshToken;
+        if (data?.permsToken) existing.response.data.authInfo.permsToken = data.permsToken;
+        if (data?.token) existing.response.data.authInfo.token = data.token;
+        // Re-extract entity from the new JWT
+        const jwt = parseJwt(newToken);
+        const entityId = jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+        const entityTypeId = jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+        if (entityId) existing.response.data.authInfo.entityId = entityId;
+        if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+        writePrivateJson(authPath, existing);
+        console.log(`  auth     : valid JWT saved to ${authPath}`);
+        if (entityId) console.log(`  entity   : ${entityId}${entityTypeId ? ` (type ${entityTypeId})` : ""}`);
+        if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
+        return;
+      }
+      console.log(`  auth     : no token in refresh response`);
+      if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
+    } finally {
+      await nusuk.close();
+    }
+  }
+
+  // No refresh token — fall back to full re-login using saved profile
+  console.log(`No refresh token found in auth.json.`);
+  let profile = null;
+  try { profile = JSON.parse(readFileSync(profilePath, "utf8")); } catch { /* ignore */ }
+  if (!profile || !profile.username || !profile.password) {
+    throw new Error(`No refresh token and no saved profile. Run "nusuk login-auto" first to create a profile.`);
+  }
+  console.log(`Falling back to full re-login using saved profile (${profile.username})...`);
+  const reloginArgs = ["--username", profile.username, "--password", profile.password];
+  if (profile.aesKey) reloginArgs.push("--aes-key", profile.aesKey);
+  if (profile.xChannel) reloginArgs.push("--x-channel", profile.xChannel);
+  if (profile.trustedDeviceToken) reloginArgs.push("--trusted-device-token", profile.trustedDeviceToken);
+  if (profile.captcha?.provider === "capmonster") reloginArgs.push("--capmonster");
+  if (profile.captcha?.siteKey) reloginArgs.push("--site-key", profile.captcha.siteKey);
+  if (profile.captcha?.pageUrl) reloginArgs.push("--page-url", profile.captcha.pageUrl);
+  await cmdAutoLogin(reloginArgs);
 }
 
 async function cmdPull(args) {
@@ -1758,8 +1932,10 @@ Usage: nusuk <command> [options]
 Common tasks:
   init                  Create ignored local config files after a fresh clone
   login                 Install the latest user credentials
+  whoami                Show current session entity info from JWT
   login-auto            Auto-login via captcha solver and save JWT
   verify-login          Verify OTP after auto-login (requires transaction ID)
+  refresh-token         Refresh the JWT using the stored refresh token or saved profile
   logout                Clear local auth, captcha, and entity state
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
@@ -1781,8 +1957,10 @@ Help:
 
 Examples:
   nusuk login
+  nusuk whoami
   nusuk login-auto --username user@email.com --password pass123
   nusuk verify-login --transaction-id <id> --otp 1234
+  nusuk refresh-token
   nusuk info
   nusuk send 12345
   nusuk api verify-subscription
@@ -1908,12 +2086,19 @@ async function main() {
     case "login":
       await cmdLogin(args);
       break;
+    case "whoami":
+      await cmdWhoami(args);
+      break;
     case "login-auto":
     case "autologin":
       await cmdAutoLogin(args);
       break;
     case "verify-login":
       await cmdVerifyLogin(args);
+      break;
+    case "refresh-token":
+    case "refresh":
+      await cmdRefreshToken(args);
       break;
     case "workflow":
       await cmdWorkflow(args);

@@ -335,8 +335,13 @@ async function handleAutoLogin(body = {}) {
     });
 
     // Save the JWT token if login succeeded
-    const token = res.json?.response?.data?.authInfo?.userToken;
-    const otpRequired = res.json?.response?.data?.otpType !== undefined && res.json?.response?.data?.authInfo === null;
+    // The login response has two paths:
+    //   - trustedDevice=true:  response.data.authInfo.{token,userToken,refreshToken,permsToken}
+    //   - trustedDevice=false: response.data.token (temp), authInfo=null, OTP required
+    const authInfo = res.json?.response?.data?.authInfo;
+    const trustedDevice = res.json?.response?.data?.trustedDevice;
+    const token = authInfo?.userToken || authInfo?.token || res.json?.response?.data?.token;
+    const otpRequired = res.json?.response?.data?.otpType !== undefined && authInfo === null;
     const intermediateToken = res.json?.response?.data?.token;
     const transactionId = res.json?.response?.data?.transactionId;
 
@@ -347,16 +352,36 @@ async function handleAutoLogin(body = {}) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
+      // Save all tokens from the response for completeness
+      if (authInfo?.refreshToken) existing.response.data.authInfo.refreshToken = authInfo.refreshToken;
+      if (authInfo?.permsToken) existing.response.data.authInfo.permsToken = authInfo.permsToken;
+      if (authInfo?.token) existing.response.data.authInfo.token = authInfo.token;
       // The login response has entityId=null at the authInfo level, but the
       // JWT payload carries defaultEntityId/defaultEntityTypeId. Extract them
       // so loadAuth() can set the activeentityid header for authenticated calls.
       const jwt = parseJwt(token);
-      const entityId = res.json?.response?.data?.authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
-      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+      const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
       if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
     }
+
+    // Save the login profile for later token refresh
+    const profilePath = process.env.PROFILE_PATH || "profile.json";
+    const profile = {
+      username,
+      password,
+      aesKey: body.aesKey || process.env.NUSUK_AES_KEY || undefined,
+      xChannel: body.xChannel || process.env.X_CHANNEL || undefined,
+      trustedDeviceToken: body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN || undefined,
+      captcha: { provider, siteKey, pageUrl, captchaVersion: body.captchaVersion || 2, captchaType: body.captchaType || "recaptcha", enterprise: body.enterprise || false },
+      lastLoginAt: new Date().toISOString(),
+      lastLoginStatus: token ? "ok" : "failed",
+      trustedDevice: trustedDevice ?? null,
+      transactionId: res.json?.response?.data?.transactionId || null,
+    };
+    writePrivateJson(profilePath, profile);
 
     return {
       ok: res.ok,
@@ -402,7 +427,12 @@ async function handleVerifyLogin(body = {}) {
     });
 
     // Save the JWT token if verification succeeded
-    const token = res.json?.response?.data?.authInfo?.userToken || res.json?.response?.data?.token;
+    // The verifyLogin response has the full AUTH_TOKEN with entity claims.
+    // Response structure: response.data.{token, userToken, refreshToken, permsToken}
+    // or response.data.authInfo.{userToken, refreshToken, permsToken}
+    const data = res.json?.response?.data;
+    const authInfo = data?.authInfo || data;
+    const token = authInfo?.userToken || authInfo?.token || data?.token;
     if (token) {
       const authPath = process.env.AUTH_PATH || "auth.json";
       const existing = readJsonIfExists(authPath, {});
@@ -410,15 +440,29 @@ async function handleVerifyLogin(body = {}) {
       existing.response.data = existing.response.data || { authInfo: {} };
       existing.response.data.authInfo = existing.response.data.authInfo || {};
       existing.response.data.authInfo.userToken = token;
-      // Extract entity info from the JWT payload (login response has it null
-      // at the authInfo level) so loadAuth() can set the activeentityid header.
+      // Save all tokens from the response for completeness
+      if (authInfo?.refreshToken) existing.response.data.authInfo.refreshToken = authInfo.refreshToken;
+      if (authInfo?.permsToken) existing.response.data.authInfo.permsToken = authInfo.permsToken;
+      if (authInfo?.token) existing.response.data.authInfo.token = authInfo.token;
+      // Extract entity info from the JWT payload (the AUTH_TOKEN has
+      // defaultEntityId/defaultEntityTypeId/entities claims) so loadAuth()
+      // can set the activeentityid header for authenticated calls.
       const jwt = parseJwt(token);
-      const entityId = res.json?.response?.data?.authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
-      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+      const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
       if (entityId) existing.response.data.authInfo.entityId = entityId;
       if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
       writePrivateJson(authPath, existing);
     }
+
+    // Update profile with verify status
+    const profilePath = process.env.PROFILE_PATH || "profile.json";
+    try {
+      const profile = readJsonIfExists(profilePath, {});
+      profile.lastVerifyAt = new Date().toISOString();
+      profile.lastVerifyStatus = token ? "ok" : "failed";
+      writePrivateJson(profilePath, profile);
+    } catch { /* profile doesn't exist yet — skip */ }
 
     return {
       ok: res.ok,
@@ -427,6 +471,69 @@ async function handleVerifyLogin(body = {}) {
       saved: Boolean(token),
       timing: res.timing,
     };
+  });
+}
+
+async function handleRefreshToken(body = {}) {
+  // Refresh the auth token using the stored refresh token from auth.json.
+  // If no refresh token is available, falls back to a full re-login using
+  // the saved profile (profile.json from a previous /login).
+  const authPath = process.env.AUTH_PATH || "auth.json";
+  const existing = readJsonIfExists(authPath, {});
+  const refreshToken = existing?.response?.data?.authInfo?.refreshToken;
+
+  if (refreshToken) {
+    return withNusuk({ ...body, skipAuth: true, skipCaptcha: true }, async (nusuk) => {
+      const res = await nusuk.request("/eh/public/authentication/refreshToken", {
+        method: "POST",
+        payload: { refreshToken },
+      });
+
+      const data = res.json?.response?.data;
+      const newToken = data?.userToken || data?.token;
+      if (newToken) {
+        existing.response.data.authInfo.userToken = newToken;
+        if (data?.refreshToken) existing.response.data.authInfo.refreshToken = data.refreshToken;
+        if (data?.permsToken) existing.response.data.authInfo.permsToken = data.permsToken;
+        if (data?.token) existing.response.data.authInfo.token = data.token;
+        const jwt = parseJwt(newToken);
+        const entityId = jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+        const entityTypeId = jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+        if (entityId) existing.response.data.authInfo.entityId = entityId;
+        if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+        writePrivateJson(authPath, existing);
+      }
+
+      return {
+        ok: res.ok,
+        status: res.status,
+        data: res.json,
+        saved: Boolean(newToken),
+        method: "refreshToken",
+        timing: res.timing,
+      };
+    });
+  }
+
+  // No refresh token — fall back to full re-login using saved profile
+  const profilePath = process.env.PROFILE_PATH || "profile.json";
+  const profile = readJsonIfExists(profilePath, null);
+  if (!profile || !profile.username || !profile.password) {
+    throw new Error("No refresh token and no saved profile. Call /login first to create a profile.");
+  }
+  return handleAutoLogin({
+    ...body,
+    username: profile.username,
+    password: profile.password,
+    aesKey: profile.aesKey,
+    xChannel: profile.xChannel,
+    trustedDeviceToken: profile.trustedDeviceToken,
+    provider: profile.captcha?.provider,
+    siteKey: profile.captcha?.siteKey,
+    pageUrl: profile.captcha?.pageUrl,
+    captchaVersion: profile.captcha?.captchaVersion,
+    captchaType: profile.captcha?.captchaType,
+    enterprise: profile.captcha?.enterprise,
   });
 }
 
@@ -639,6 +746,7 @@ const CMD_CATALOG = {
   login:            { args: ["--system-user", "--type", "--endpoint"], description: "Install latest user credentials" },
   "login-auto":     { args: ["--capmonster", "--provider", "--username", "--password", "--site-key", "--page-url", "--x-channel", "--trusted-device-token", "--captcha-version", "--captcha-type", "--enterprise"], description: "Auto-login via captcha solver and save JWT" },
   "verify-login":   { args: ["--transaction-id", "--otp", "--system", "--module"], description: "Verify OTP after auto-login" },
+  "refresh-token":  { args: [],                          description: "Refresh JWT via stored refresh token or saved profile" },
   logout:           { args: [],                          description: "Clear local auth/captcha/entity state" },
   pull:             { args: ["--entity", "--type", "--endpoint"], description: "Refresh auth, entity, and CAPTCHA" },
   info:             { args: [],                          description: "Show dashboard company info" },
@@ -883,6 +991,14 @@ const API_DOCS = [
     response: { ok: true, status: 200, data: "{ ...verify response with authInfo.userToken }", saved: true, timing: "{ total, ttfb }" },
   },
   {
+    method: "POST", path: "/refresh-token",
+    description: "Refresh the JWT using the stored refresh token from auth.json. Falls back to a full re-login using the saved profile.json if no refresh token is available.",
+    auth: "none (uses stored refresh token or saved profile)",
+    body: {},
+    example: 'curl -X POST https://toque.decloud.workers.dev/refresh-token -H "Content-Type: application/json" -d \'{}\'',
+    response: { ok: true, status: 200, data: "{ ...refresh response }", saved: true, method: "refreshToken", timing: "{ total, ttfb }" },
+  },
+  {
     method: "POST", path: "/captcha/solve",
     description: "Solve a CAPTCHA via CapSolver (default) or CapMonster Cloud (--capmonster)",
     auth: "CAPSOLVER_API_KEY or CAPMONSTER_API_KEY env var",
@@ -967,6 +1083,7 @@ const ROUTES = {
   "/groups": handleGroups,
   "/login": handleAutoLogin,
   "/verify-login": handleVerifyLogin,
+  "/refresh-token": handleRefreshToken,
   "/captcha/solve": handleCaptchaSolve,
   "/captcha/balance": handleCaptchaBalance,
   "/schedule": handleSchedule,

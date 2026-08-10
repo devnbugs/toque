@@ -55,10 +55,16 @@ export class Nusuk {
 
     const authInfo = parsed?.response?.data?.authInfo;
     this.setAuthToken(token);
-    if (authInfo?.entityId) {
-      this.setEntityId(authInfo.entityId);
-      if (authInfo.entityTypeId && !this.entityTypeId) {
-        this.setEntityTypeId(authInfo.entityTypeId);
+    // Extract entity from authInfo, or fall back to JWT claims
+    // (login response has authInfo.entityId=null, but the AUTH_TOKEN JWT
+    // carries defaultEntityId/defaultEntityTypeId/entities)
+    const jwt = parseJwt(token);
+    const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+    const entityTypeId = authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+    if (entityId) {
+      this.setEntityId(entityId);
+      if (entityTypeId && !this.entityTypeId) {
+        this.setEntityTypeId(entityTypeId);
       }
     }
     return this;

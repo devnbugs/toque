@@ -3,6 +3,7 @@ auth.json
 captcha.json
 creds.json
 entity.json
+profile.json
 .env
 .env.*
 !.env.example
