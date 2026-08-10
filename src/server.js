@@ -24,6 +24,7 @@ import { computeSendSchedule } from "./scheduling.js";
 import { parsePositiveCount, parseTargetTime } from "./validation.js";
 import { pullCaptchaOnce, runCaptchaPullLoop, normalizeCaptchaType, parseInterval } from "./captcha-puller.js";
 import { jsonResponse, writePrivateJson, readJsonIfExists } from "./utils.js";
+import { log } from "./log.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -987,15 +988,29 @@ const server = createServer(async (req, res) => {
     return jsonResponse(res, 405, { ok: false, error: "Method not allowed" }, req);
   }
 
+  const startedAt = Date.now();
   try {
     const body = req.method === "POST" ? await parseBody(req) : {};
     const result = await handler(body);
-    jsonResponse(res, result.status && !result.ok ? result.status : 200, result, req);
+    const status = result.status && !result.ok ? result.status : 200;
+    jsonResponse(res, status, result, req);
+    log.info("request.handled", `${req.method} ${url.pathname}`, {
+      method: req.method,
+      path: url.pathname,
+      status,
+      durationMs: Date.now() - startedAt,
+    });
   } catch (err) {
+    log.error("request.failed", `${req.method} ${url.pathname} failed`, {
+      method: req.method,
+      path: url.pathname,
+      error: err.message,
+      durationMs: Date.now() - startedAt,
+    });
     jsonResponse(res, 500, { ok: false, error: err.message }, req);
   }
 });
 
 server.listen(PORT, () => {
-  console.log(`Toque container listening on port ${PORT}`);
+  log.info("server.listening", `Toque container listening on port ${PORT}`, { port: PORT });
 });

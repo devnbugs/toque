@@ -522,8 +522,8 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
 
 async function cmdLogout(args) {
   const cleared = clearLocalState();
-  console.log(`Cleared local auth and entity state.`);
-  console.log(`  files   : ${cleared.join(", ")}`);
+  console.log(`\n✓ Cleared local auth and entity state`);
+  console.log(`  files: ${cleared.join(", ")}`);
   return cleared;
 }
 
@@ -544,17 +544,19 @@ async function cmdLogin(args) {
     endpoint: getArg("--endpoint"),
     systemUserId,
   });
-  console.log(`Loading latest D1 context for system user ${systemUserId}...`);
+  console.log(`\n→ Loading D1 context for system user ${systemUserId}...`);
   const context = await worker.fetchUserContext(systemUserId);
   const result = saveContext(context, {
     type: getArg("--type") || "visa",
     worker,
   });
 
-  console.log(`  entity  : ${context.entityId}`);
-  console.log(`  auth    : ${result.token ? "valid JWT saved" : "not available"}`);
-  console.log(`  captcha : ${result.captcha ? "saved" : "not available"}`);
-  console.log(`  files   : ${result.authPath}, ${result.captchaPath}, ${result.entityPath}`);
+  console.log(`\n┌─ Login result`);
+  console.log(`│  ${result.token ? "✓" : "✗"} auth    ${result.token ? "valid JWT saved" : "not available"}`);
+  console.log(`│  ${result.captcha ? "✓" : "✗"} captcha ${result.captcha ? "saved" : "not available"}`);
+  console.log(`│  • entity  ${context.entityId}`);
+  console.log(`│  • files   ${result.authPath}, ${result.captchaPath}, ${result.entityPath}`);
+  console.log(`└─`);
   if (!result.token) process.exitCode = 1;
 }
 
@@ -748,13 +750,15 @@ async function cmdPull(args) {
 
   const { token, captcha, authPath, captchaPath, entityId: tokenEntityId } = await pullCreds({ entityId, type, endpoint });
 
-  if (!token) console.error("  Warning: no auth token found in worker records");
-  if (!captcha) console.error(`  Warning: no ${type} captcha found in worker`);
+  console.log(`\n┌─ Pull from worker (entity ${entityId}, type ${type})`);
+  if (!token) console.log(`│  ⚠ no auth token found in worker records`);
+  if (!captcha) console.log(`│  ⚠ no ${type} captcha found in worker`);
 
-  console.log(`\n  auth    -> ${authPath}${token ? "" : " (skipped — none found)"}`);
-  console.log(`  captcha -> ${captchaPath}${captcha ? "" : " (skipped — none found)"}`);
-  if (token) console.log(`  token   : ${token.slice(0, 28)}... (entity ${tokenEntityId})`);
-  if (captcha) console.log(`  captcha : ${captcha.slice(0, 28)}...`);
+  console.log(`│  ${token ? "✓" : "✗"} auth    → ${authPath}${token ? "" : " (skipped — none found)"}`);
+  console.log(`│  ${captcha ? "✓" : "✗"} captcha → ${captchaPath}${captcha ? "" : " (skipped — none found)"}`);
+  if (token) console.log(`│  • token   ${token.slice(0, 28)}... (entity ${tokenEntityId})`);
+  if (captcha) console.log(`│  • captcha ${captcha.slice(0, 28)}...`);
+  console.log(`└─`);
 
   if (!token && !captcha) process.exitCode = 1;
 }
@@ -842,13 +846,14 @@ async function cmdBench(args) {
   await nusuk.init();
 
   try {
-    console.log(`Sending ${count} test requests...\n`);
+    console.log(`\n┌─ Benchmark: ${count} requests to ${nusuk.baseUrl}\n│`);
     const samples = [];
     for (let i = 0; i < count; i++) {
       const res = await nusuk.request("/manifest.json", { cacheBust: true });
       const t = res.timing;
       samples.push(t);
-      console.log(`  req ${i + 1}: total=${ms(t.total)}  ttfb=${ms(t.ttfb ?? "?")}  status=${res.status}`);
+      const statusIcon = res.status === 200 ? "✓" : "✗";
+      console.log(`│  ${statusIcon} req ${String(i + 1).padStart(2)}  total=${ms(t.total).padStart(6)}  ttfb=${ms(t.ttfb ?? "?").padStart(6)}  status=${res.status}`);
     }
 
     const totals = samples.map((s) => s.total);
@@ -857,21 +862,21 @@ async function cmdBench(args) {
     const min = (arr) => Math.min(...arr);
     const max = (arr) => Math.max(...arr);
 
-    console.log(`\n--- Latency Stats ---`);
-    console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(max(totals))}`);
+    console.log(`│\n├─ Latency Summary ───────────────────────────────────────`);
+    console.log(`│  total RTT   min=${ms(min(totals)).padStart(6)}  avg=${ms(avg(totals)).padStart(6)}  max=${ms(max(totals)).padStart(6)}`);
     if (ttfbVals.length) {
-      console.log(`  ttfb       : min=${ms(min(ttfbVals))}  avg=${ms(avg(ttfbVals))}  max=${ms(max(ttfbVals))}  (${ttfbVals.length}/${count} samples)`);
+      console.log(`│  ttfb        min=${ms(min(ttfbVals)).padStart(6)}  avg=${ms(avg(ttfbVals)).padStart(6)}  max=${ms(max(ttfbVals)).padStart(6)}  (${ttfbVals.length}/${count} samples)`);
       const minTtfb = min(ttfbVals);
       const avgTtfb = avg(ttfbVals);
-      console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
+      console.log(`│  server proc ${ms(avgTtfb - minTtfb).padStart(6)}  (avg ttfb - min ttfb)`);
       const netOneWay = Math.round(minTtfb / 2);
-      console.log(`  net 1-way  : ${ms(netOneWay)}  (min ttfb ÷ 2)  <-- request delivery`);
+      console.log(`│  net 1-way   ${ms(netOneWay).padStart(6)}  (min ttfb ÷ 2)  ← request delivery`);
       const oneway = netOneWay || Math.round(avg(totals) / 2);
-      console.log(`  one-way ~  : ${ms(oneway)}`);
+      console.log(`│  one-way ~   ${ms(oneway).padStart(6)}`);
     } else {
-      console.log(`  ttfb       : (no resource timing entries — enable cacheBust or check browser)`);
+      console.log(`│  ttfb        (no resource timing entries — enable cacheBust or check browser)`);
       const oneway = Math.round(avg(totals) / 2);
-      console.log(`  one-way ~  : ${ms(oneway)}`);
+      console.log(`│  one-way ~   ${ms(oneway).padStart(6)}`);
     }
   } finally {
     await nusuk.close();
@@ -923,10 +928,11 @@ async function cmdReq(args) {
     console.log(JSON.stringify(res.json, null, 2));
     return;
   }
-  console.log(`status: ${res.status}`);
-  if (res.timing) console.log(`timing:`, res.timing);
-  if (res.json) console.log(`body:`, JSON.stringify(res.json, null, 2));
-  else console.log(`body:`, res.body);
+  const statusIcon = res.ok ? "✓" : "✗";
+  console.log(`\n${statusIcon} ${method} ${path} → ${res.status}`);
+  if (res.timing) console.log(`⏱  total=${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
+  if (res.json) console.log(`\n${JSON.stringify(res.json, null, 2)}`);
+  else console.log(`\n${res.body}`);
 }
 
 async function executeRequest({ path, method = "GET", payload, useCaptcha = false, captchaType = "visa" }) {
@@ -1379,19 +1385,19 @@ async function cmdSchedule(args) {
     const quality = connectionQuality(sdTtfb);
     const driftRange = sdTtfb > 0 ? `\u00b1${sdTtfb}ms` : "\u22645ms";
 
-    console.log(`\n--- Connection Quality ---`);
-    console.log(`  stability    : ${quality.icon} ${quality.label}  (stddev ${ms(sdTtfb)}, drift ~${driftRange})`);
-    console.log(`  min ttfb     : ${ms(minTtfb)}`);
-    console.log(`  avg ttfb     : ${ms(avgRealTtfb)}`);
-    console.log(`  weighted 1-way: ${ms(netOneWay)}  (min\xd70.6 + avg\xd70.4 \xf7 2)`);
-    console.log(`  jitter buffer : ${ms(jitterBuffer)}`);
-    console.log(`\n--- Schedule ---`);
-    console.log(`  deliver to server: ${formatTime(target)}`);
-    console.log(`  send at          : ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
+    console.log(`\n┌─ Connection Quality ${quality.icon} ${quality.label}`);
+    console.log(`│  • stability     stddev ${ms(sdTtfb)}, drift ~${driftRange}`);
+    console.log(`│  ⏱ min ttfb      ${ms(minTtfb)}`);
+    console.log(`│  ⏱ avg ttfb      ${ms(avgRealTtfb)}`);
+    console.log(`│  ⏱ weighted 1-way ${ms(netOneWay)}  (min×0.6 + avg×0.4 ÷ 2)`);
+    console.log(`│  ⏱ jitter buffer ${ms(jitterBuffer)}`);
+    console.log(`│\n├─ Schedule`);
+    console.log(`│  ⏱ deliver to server  ${formatTime(target)}`);
+    console.log(`│  ⏱ send at            ${formatTime(sendAt)}  (${ms(sendAhead)} ahead)`);
 
     const waitMs = sendAt.getTime() - Date.now();
     if (waitMs > 0) {
-      console.log(`  waiting ${ms(waitMs)}...`);
+      console.log(`│\n│  ⏱ waiting ${ms(waitMs)}...`);
 
       // Phase 3: mid-calibration refresh at 60% of wait time
       if (waitMs > 5000) {
@@ -1407,10 +1413,10 @@ async function cmdSchedule(args) {
           const adjustedAhead = refreshOneWay + jitterBuffer;
           const adjustedSend = new Date(target.getTime() - adjustedAhead);
           if (adjustedSend.getTime() < sendAt.getTime() + 200 && adjustedSend.getTime() > Date.now()) {
-            console.log(`\n  \u21aa refresh 1-way: ${ms(refreshOneWay)}  -> adjusting send time`);
+            console.log(`│  ↳ refresh 1-way: ${ms(refreshOneWay)}  → adjusting send time`);
             sendAt.setTime(adjustedSend.getTime());
           } else {
-            console.log(`\n  \u21aa refresh 1-way: ${ms(refreshOneWay)}  (keep original schedule)`);
+            console.log(`│  ↳ refresh 1-way: ${ms(refreshOneWay)}  (keep original schedule)`);
           }
         }
       }
@@ -1424,19 +1430,22 @@ async function cmdSchedule(args) {
       const serverArrival = sendActual + netOneWay;
       const drift = serverArrival - target.getTime();
 
-      console.log(`\n--- Result ---`);
-      console.log(`  sent at          : ${formatTime(new Date(sendActual))}`);
-      console.log(`  ~server arrival  : ${formatTime(new Date(serverArrival))}`);
-      console.log(`  target           : ${formatTime(target)}`);
-      console.log(`  drift            : ${drift >= 0 ? "+" : ""}${drift}ms`);
-      console.log(`  response received: ${formatTime(new Date(responseReceived))}`);
-      console.log(`  response status  : ${res.status}`);
+      const statusIcon = res.status === 200 ? "✓" : "✗";
+      console.log(`│\n├─ Result ${statusIcon}`);
+      console.log(`│  ⏱ sent at          ${formatTime(new Date(sendActual))}`);
+      console.log(`│  ⏱ ~server arrival  ${formatTime(new Date(serverArrival))}`);
+      console.log(`│  ⏱ target           ${formatTime(target)}`);
+      console.log(`│  ⏱ drift            ${drift >= 0 ? "+" : ""}${drift}ms`);
+      console.log(`│  ⬇ response received ${formatTime(new Date(responseReceived))}`);
+      console.log(`│  ${statusIcon} response status  ${res.status}`);
       if (res.timing) {
-        console.log(`  actual ttfb      : ${ms(res.timing.total)}`);
+        console.log(`│  ⏱ actual ttfb      ${ms(res.timing.total)}`);
       }
-      if (res.json) console.log(`  response:`, JSON.stringify(res.json, null, 2).slice(0, 600));
+      if (res.json) console.log(`│  • response         ${JSON.stringify(res.json, null, 2).slice(0, 600).split("\n").join("\n│  ")}`);
+      console.log(`└─`);
     } else {
-      console.log(`  target ${formatTime(target)} is too close or in the past.`);
+      console.log(`│  ⚠ target ${formatTime(target)} is too close or in the past.`);
+      console.log(`└─`);
     }
   } finally {
     await nusuk.close();
@@ -1655,15 +1664,17 @@ async function cmdSendVisa(args) {
     let schedule = null;
     if (target) {
       schedule = await warmVisaConnection(nusuk, target);
-      console.log(`  target           : ${formatTime(target)}`);
-      console.log(`  estimated one-way: ${ms(schedule.oneWayMs)}`);
-      console.log(`  send at          : ${formatTime(schedule.sendAt)} (${ms(schedule.sendAheadMs)} ahead)`);
+      console.log(`\n┌─ Schedule`);
+      console.log(`│  ⏱ target           ${formatTime(target)}`);
+      console.log(`│  ⏱ estimated 1-way  ${ms(schedule.oneWayMs)}`);
+      console.log(`│  ⏱ send at          ${formatTime(schedule.sendAt)} (${ms(schedule.sendAheadMs)} ahead)`);
+      console.log(`└─`);
     }
 
     const actualSendAt = target ? schedule.sendAt.getTime() : sendAt;
     const secondWait = actualSendAt - Date.now();
     if (secondWait > 0) {
-      console.log(`  waiting ${ms(secondWait)} until execute (${formatTime(new Date(actualSendAt))})...`);
+      console.log(`\n⏱ waiting ${ms(secondWait)} until execute (${formatTime(new Date(actualSendAt))})...`);
       await new Promise((r) => setTimeout(r, secondWait));
     }
 
@@ -1678,13 +1689,13 @@ async function cmdSendVisa(args) {
       payload,
     };
 
-    console.log(`\n--- Request Preview ---`);
-    console.log(`  method  : ${requestPreview.method}`);
-    console.log(`  url     : ${requestPreview.url}`);
-    console.log(`  headers :`, JSON.stringify(requestPreview.headers, null, 2));
-    console.log(`  payload :`, JSON.stringify(requestPreview.payload, null, 2));
-    console.log(`  curl    :`);
-    console.log(formatCurlPreview(requestPreview.url, requestPreview.headers, requestPreview.payload));
+    console.log(`\n┌─ Request Preview ────────────────────────────────────────`);
+    console.log(`│  ➤ ${requestPreview.method} ${requestPreview.url}`);
+    console.log(`│  headers: ${JSON.stringify(requestPreview.headers, null, 2).split("\n").join("\n│  ")}`);
+    console.log(`│  payload: ${JSON.stringify(requestPreview.payload, null, 2).split("\n").join("\n│  ")}`);
+    console.log(`│  curl:`);
+    console.log(`│  ${formatCurlPreview(requestPreview.url, requestPreview.headers, requestPreview.payload).split("\n").join("\n│  ")}`);
+    console.log(`└─`);
 
     const res = await nusuk.request(VISA_PATH, { method: "POST", payload });
     const responseReceived = Date.now();
@@ -1694,15 +1705,17 @@ async function cmdSendVisa(args) {
       response: res,
     });
 
-    console.log(`\n--- Result ---`);
-    console.log(`  sent at          : ${formatTime(timing.sendAt)}`);
-    console.log(`  response received: ${formatTime(timing.responseReceivedAt)}`);
-    console.log(`  elapsed          : ${ms(timing.elapsedMs)}`);
-    console.log(`  response date    : ${timing.serverDateHeader || "(none)"}`);
-    console.log(`  status           : ${res.status}`);
-    if (res.timing) console.log(`  timing           : ${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
-    if (res.json) console.log(`  response         :`, JSON.stringify(res.json, null, 2).slice(0, 600));
-    else console.log(`  body             :`, String(res.body).slice(0, 600));
+    const statusIcon = res.status === 200 ? "✓" : "✗";
+    console.log(`\n┌─ Result ${statusIcon}`);
+    console.log(`│  ⏱ sent at          ${formatTime(timing.sendAt)}`);
+    console.log(`│  ⬇ response received ${formatTime(timing.responseReceivedAt)}`);
+    console.log(`│  ⏱ elapsed          ${ms(timing.elapsedMs)}`);
+    console.log(`│  • response date    ${timing.serverDateHeader || "(none)"}`);
+    console.log(`│  ${statusIcon} status            ${res.status}`);
+    if (res.timing) console.log(`│  ⏱ timing           total=${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
+    if (res.json) console.log(`│  • response         ${JSON.stringify(res.json, null, 2).slice(0, 600).split("\n").join("\n│  ")}`);
+    else console.log(`│  • body             ${String(res.body).slice(0, 600)}`);
+    console.log(`└─`);
 
     if (res.status !== 200) process.exitCode = 1;
   } finally {
