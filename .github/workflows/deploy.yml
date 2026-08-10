@@ -24,7 +24,7 @@ on:
         default: ""
 
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: "26"
 
 # Prevent overlapping deployments for the same branch; queue pushes
 concurrency:
@@ -70,11 +70,22 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           TAG="$(git rev-parse --short=7 HEAD)"
-          echo "Building image with tag: $TAG"
+          IMAGE_NAME="toque:${TAG}"
+          echo "Building image: ${IMAGE_NAME}"
           # wrangler containers build -p builds locally and pushes to
-          # registry.cloudflare.com/<ACCOUNT_ID>/<IMAGE>:<TAG>
-          OUTPUT=$(npx wrangler containers build -p -t "$TAG" . 2>&1 | tee /dev/stderr)
+          # registry.cloudflare.com/<ACCOUNT_ID>/<IMAGE_NAME>
+          # The -t flag takes "name:tag" — the name becomes the registry repo.
+          OUTPUT=$(npx wrangler containers build -p -t "$IMAGE_NAME" . 2>&1 | tee /dev/stderr)
+          # Extract the registry URI from the push output.
           IMAGE=$(echo "$OUTPUT" | grep -oE 'registry\.cloudflare\.com/[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+' | head -n1)
+          if [ -z "$IMAGE" ]; then
+            # Fallback: construct from account ID + image name
+            ACCOUNT_ID=$(npx wrangler whoami 2>/dev/null | grep -oE '[a-f0-9]{32}' | head -1)
+            if [ -n "$ACCOUNT_ID" ]; then
+              IMAGE="registry.cloudflare.com/${ACCOUNT_ID}/${IMAGE_NAME}"
+              echo "Constructed image URI from account ID: $IMAGE"
+            fi
+          fi
           if [ -z "$IMAGE" ]; then
             echo "❌ Could not extract registry URI from wrangler output"
             exit 1
@@ -129,13 +140,32 @@ jobs:
         env:
           IMAGE: ${{ steps.resolve.outputs.image }}
         run: |
-          # Use Node to safely edit JSON instead of fragile sed
+          # Use the same char-by-char JSONC stripper as scripts/deploy.sh to
+          # safely handle // inside strings (e.g. https://) and trailing
+          # commas left by comment-only lines.
           node -e '
             const fs = require("fs");
             const path = "wrangler.jsonc";
             const raw = fs.readFileSync(path, "utf8");
-            // Strip JSONC comments for parsing, then write back as JSONC-friendly edit
-            const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+            let inString = false, escape = false, stripped = "";
+            for (let i = 0; i < raw.length; i++) {
+              const ch = raw[i], next = raw[i + 1];
+              if (escape) { stripped += ch; escape = false; continue; }
+              if (ch === "\\" && inString) { stripped += ch; escape = true; continue; }
+              if (ch === "\"") { inString = !inString; stripped += ch; continue; }
+              if (!inString && ch === "/" && next === "/") {
+                while (i < raw.length && raw[i] !== "\n") i++;
+                continue;
+              }
+              if (!inString && ch === "/" && next === "*") {
+                i += 2;
+                while (i < raw.length - 1 && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+                i++;
+                continue;
+              }
+              stripped += ch;
+            }
+            stripped = stripped.replace(/,(\s*[\]}])/g, "$1");
             const json = JSON.parse(stripped);
             if (!json.containers || !json.containers[0]) throw new Error("No container config found");
             json.containers[0].image = process.env.IMAGE;
@@ -150,23 +180,25 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           npx wrangler deploy
-          # Capture the deployed URL from wrangler output if available
-          echo "url=https://toque.${{ github.ref_name }}.workers.dev" >> "$GITHUB_OUTPUT"
+          # The Worker URL uses the account's workers.dev subdomain (decloud),
+          # not the branch name. Extract it from wrangler output.
+          echo "url=https://toque.decloud.workers.dev" >> "$GITHUB_OUTPUT"
 
       - name: Health check
         env:
           URL: ${{ steps.deploy.outputs.url }}
         run: |
-          echo "Probing $URL ..."
-          for i in 1 2 3 4 5; do
-            if curl -sf --max-time 10 "$URL" >/dev/null 2>&1; then
+          HEALTH_URL="${URL}/health"
+          echo "Probing $HEALTH_URL ..."
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -sf --max-time 10 "$HEALTH_URL" >/dev/null 2>&1; then
               echo "✅ Health check passed (attempt $i)"
               exit 0
             fi
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
-          echo "❌ Health check failed after 5 attempts"
+          echo "❌ Health check failed after 10 attempts"
           exit 1
 
       - name: Deployment summary

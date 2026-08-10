@@ -188,7 +188,7 @@ export class Nusuk {
     }
   }
 
-  async request(path, { method = "GET", payload = null, headers = {}, credentials = "include", mode = "cors", redirect = "follow" } = {}) {
+  async request(path, { method = "GET", payload = null, headers = {}, credentials = "include", mode = "cors", redirect = "follow", cacheBust = false } = {}) {
     if (!this.page) {
       throw new Error("Nusuk not initialized. Call await nusuk.init() first.");
     }
@@ -199,8 +199,17 @@ export class Nusuk {
       throw new Error(`Refusing cross-origin request to ${requestUrl.origin}`);
     }
 
+    // Cache-busting: append a unique query param so the browser creates a fresh
+    // Resource Timing entry and never serves from the HTTP cache. This is
+    // essential for benchmark accuracy (otherwise repeated requests report
+    // ttfb=0 and total<5ms because they hit the disk/memory cache).
+    if (cacheBust) {
+      requestUrl.searchParams.set("_cb", String(Date.now()) + Math.floor(Math.random() * 1000));
+    }
+
     await this._ensureOrigin();
     const requestHeaders = await this.buildRequestHeaders(headers);
+    const finalUrl = requestUrl.toString();
 
     return this.page.evaluate(
       async ({ url, options }) => {
@@ -222,7 +231,11 @@ export class Nusuk {
         }
 
         const entries = performance.getEntriesByType("resource");
-        const entry = entries.find((e) => e.name === url || res.url.includes(new URL(e.name).pathname));
+        // Match by exact URL first, then by pathname (handles redirects/normalization).
+        const entry = entries.find((e) => e.name === url) ||
+          entries.find((e) => {
+            try { return new URL(e.name).pathname === new URL(url).pathname; } catch { return false; }
+          });
         const timing = {
           total: Math.round(fetchEnd - fetchStart),
         };
@@ -245,7 +258,7 @@ export class Nusuk {
         };
       },
       {
-        url: requestUrl.toString(),
+        url: finalUrl,
         options: (() => {
           const opts = {
             method,

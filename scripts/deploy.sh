@@ -60,7 +60,9 @@ set_image() {
     const raw = fs.readFileSync(path, "utf8");
     // Strip JSONC comments safely — only remove // and /* */ that are NOT
     // inside string literals. Walk the string char-by-char tracking whether
-    // we are inside a double-quoted string.
+    // we are inside a double-quoted string. Also remove trailing commas
+    // left behind when comment-only lines are stripped (JSONC allows them,
+    // JSON does not).
     let inString = false;
     let escape = false;
     let stripped = "";
@@ -71,7 +73,7 @@ set_image() {
       if (ch === "\\" && inString) { stripped += ch; escape = true; continue; }
       if (ch === "\"") { inString = !inString; stripped += ch; continue; }
       if (!inString && ch === "/" && next === "/") {
-        // line comment — skip to end of line
+        // line comment — skip to end of line (but keep the newline)
         while (i < raw.length && raw[i] !== "\n") i++;
         continue;
       }
@@ -84,6 +86,9 @@ set_image() {
       }
       stripped += ch;
     }
+    // Remove trailing commas: a comma followed by only whitespace and then
+    // a closing } or ] is invalid JSON and must be removed.
+    stripped = stripped.replace(/,(\s*[\]}])/g, "$1");
     const json = JSON.parse(stripped);
     if (!json.containers || !json.containers[0]) throw new Error("No container config in wrangler.jsonc");
     json.containers[0].image = process.argv[2];

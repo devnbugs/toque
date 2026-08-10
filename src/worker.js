@@ -19,9 +19,16 @@ const CAPTCHA_TYPES = new Set(["visa", "login", "general"]);
 
 export class AuthaWorker {
   constructor(config = {}) {
+    // When AUTHA_PROXY_URL is set (by the toque Worker's container envVars),
+    // route requests through the Worker's /autha/* service-binding proxy
+    // instead of calling the autha-worker directly over the public internet.
+    // The proxy injects the API token via the service binding, so the
+    // apiToken is not needed in proxy mode.
+    const proxyUrl = config.proxyUrl || process.env.AUTHA_PROXY_URL || "";
+    this.proxyMode = Boolean(proxyUrl);
     this.endpoint = (
       config.endpoint ||
-      process.env.WORKER_URL ||
+      (this.proxyMode ? proxyUrl : process.env.WORKER_URL) ||
       DEFAULT_ENDPOINT
     ).replace(/\/+$/, "");
     this.entityId =
@@ -47,15 +54,16 @@ export class AuthaWorker {
   async _get(path) {
     const sep = path.includes("?") ? "&" : "?";
     const url = `${this.endpoint}${path}${sep}systemUserId=${encodeURIComponent(this.systemUserId)}`;
-    if (!this.apiToken) {
+    // In proxy mode, the toque Worker injects the API token via the
+    // service binding — no Authorization header needed from the client.
+    if (!this.proxyMode && !this.apiToken) {
       throw new Error("WORKER_API_TOKEN is required");
     }
-    const resp = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${this.apiToken}`,
-      },
-    });
+    const headers = { Accept: "application/json" };
+    if (!this.proxyMode) {
+      headers.Authorization = `Bearer ${this.apiToken}`;
+    }
+    const resp = await fetch(url, { headers });
     let json = null;
     try {
       json = await resp.json();

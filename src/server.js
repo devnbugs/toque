@@ -14,7 +14,10 @@ import { dirname, resolve } from "path";
 import { Nusuk } from "./nusuk.js";
 import { AuthaWorker } from "./worker.js";
 import { CapSolver } from "./capsolver.js";
+import { CapMonsterSolver } from "./capmonster.js";
 import { buildVisaPayload } from "./visa-payload.js";
+import { buildLoginRequest, DEFAULT_TRUSTED_DEVICE_TOKEN } from "./nusuk-crypto.js";
+import { parseJwt } from "./jwt.js";
 import { getRequest, listRequests } from "./requests.js";
 import { extractGroups, formatGroups, normalizeGroupId } from "./groups.js";
 import { computeSendSchedule } from "./scheduling.js";
@@ -74,10 +77,11 @@ function buildNusuk(body = {}) {
     },
   });
 
+  const skipAuth = body.skipAuth === true;
   const authToken = body.authToken || process.env.AUTH_TOKEN || process.env.NUSUK_AUTH_TOKEN;
   if (authToken) {
     nusuk.setAuthToken(authToken);
-  } else {
+  } else if (!skipAuth) {
     nusuk.loadAuth();
   }
 
@@ -86,11 +90,12 @@ function buildNusuk(body = {}) {
     activeEntityTypeId: body.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID,
   });
 
+  const skipCaptcha = body.skipCaptcha === true;
   const captchaType = body.captchaType || process.env.CAPTCHA_TYPE || "visa";
   const captchaToken = body.captchaToken || process.env.CAPTCHA_TOKEN;
   if (captchaToken) {
     nusuk.captchaToken = captchaToken;
-  } else {
+  } else if (!skipCaptcha) {
     nusuk.loadCaptcha(undefined, captchaType);
   }
 
@@ -112,10 +117,16 @@ async function withNusuk(body, callback) {
 // ---------------------------------------------------------------------------
 
 async function handlePull(body) {
-  requireEnv(["WORKER_URL", "WORKER_API_TOKEN"]);
+  // In proxy mode, AUTHA_PROXY_URL is set and WORKER_API_TOKEN is not needed
+  // (the Worker injects it via the service binding). In direct mode, both
+  // WORKER_URL and WORKER_API_TOKEN are required.
+  const proxyMode = Boolean(process.env.AUTHA_PROXY_URL);
+  if (!proxyMode) {
+    requireEnv(["WORKER_URL", "WORKER_API_TOKEN"]);
+  }
   const worker = new AuthaWorker({
-    endpoint: process.env.WORKER_URL,
-    apiToken: process.env.WORKER_API_TOKEN,
+    endpoint: proxyMode ? undefined : process.env.WORKER_URL,
+    apiToken: proxyMode ? undefined : process.env.WORKER_API_TOKEN,
     entityId: body.activeEntityId || process.env.ACTIVE_ENTITY_ID,
     systemUserId: body.systemUserId || process.env.SYSTEM_USER_ID,
   });
@@ -196,7 +207,7 @@ async function handleSend(body) {
   return withNusuk(body, async (nusuk) => {
     const payload = buildVisaPayload(body.payload, groupId, nusuk.captchaToken);
     const res = await nusuk.request(
-      "/umrah/visa_apis/api/Visa/SendToIssueVisa",
+      "/umrah/groups_apis/api/Groups/SendToIssueVisa",
       { method: "POST", payload }
     );
     return { ok: res.ok, status: res.status, data: res.json, timing: res.timing };
@@ -207,13 +218,23 @@ async function handleApi(body) {
   const name = String(body.name || "").trim().toLowerCase();
   const request = getRequest(name);
   if (!request) throw new Error(`Unknown API request: ${body.name}`);
-  return withNusuk(body, async (nusuk) => {
-    const payload = request.captcha
-      ? { ...request.payload, captchaToken: nusuk.captchaToken }
-      : request.payload;
+  // Skip captcha loading when the catalog entry doesn't need it — avoids
+  // requiring captcha.json for endpoints that never send a captchaToken.
+  const effectiveBody = request.captcha ? body : { ...body, skipCaptcha: true };
+  return withNusuk(effectiveBody, async (nusuk) => {
+    let payload = { ...request.payload };
+    if (request.captcha) {
+      const field = request.captchaField || "captchaToken";
+      payload[field] = nusuk.captchaToken;
+    }
+    if (body.payload) {
+      payload = { ...payload, ...body.payload };
+    }
+    const headers = { ...(request.extraHeaders || {}), ...(body.headers || {}) };
     const res = await nusuk.request(request.path, {
       method: request.method,
       payload,
+      headers,
     });
     return { ok: res.ok, status: res.status, data: res.json, timing: res.timing };
   });
@@ -256,16 +277,207 @@ async function handleGroups(body) {
   });
 }
 
+async function handleAutoLogin(body = {}) {
+  // Auto-login: solve a CAPTCHA, encrypt credentials, send login request,
+  // and save the returned JWT to auth.json.
+  const provider = body.provider || process.env.CAPTCHA_PROVIDER || "capmonster";
+  const siteKey = body.siteKey || process.env.CAPTCHA_SITE_KEY || process.env.CAPMONSTER_SITE_KEY || "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";
+  const pageUrl = body.pageUrl || process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/pub/login";
+
+  // Require username/password for credential encryption
+  const username = body.username || process.env.NUSUK_USERNAME;
+  const password = body.password || process.env.NUSUK_PASSWORD;
+  if (!username || !password) {
+    throw new Error("username and password are required (pass in body or set NUSUK_USERNAME/NUSUK_PASSWORD env vars)");
+  }
+
+  let captchaToken;
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+      siteKey,
+      pageUrl,
+      pageAction: body.pageAction || process.env.CAPMONSTER_PAGE_ACTION,
+    });
+    captchaToken = await solver.solve({
+      version: body.captchaVersion || 2,
+      type: body.captchaType || "recaptcha",
+      enterprise: body.enterprise || false,
+      timeout: body.timeout || 180000,
+    });
+  } else {
+    requireEnv(["CAPSOLVER_API_KEY"]);
+    const solver = new CapSolver({
+      clientKey: process.env.CAPSOLVER_API_KEY,
+      siteKey: body.siteKey || process.env.CAPSOLVER_SITE_KEY || siteKey,
+      pageUrl: body.pageUrl || process.env.CAPSOLVER_PAGE_URL || pageUrl,
+      pageAction: body.pageAction || process.env.CAPSOLVER_PAGE_ACTION,
+    });
+    captchaToken = await solver.solve();
+  }
+
+  // Build the login payload and headers using Nusuk's encryption
+  const { payload: loginPayload, headers: loginHeaders } = buildLoginRequest({
+    username,
+    password,
+    captchaToken,
+    key: body.aesKey || process.env.NUSUK_AES_KEY,
+    xChannel: body.xChannel || process.env.X_CHANNEL,
+    trustedDeviceToken: body.trustedDeviceToken || process.env.TRUSTED_DEVICE_TOKEN || DEFAULT_TRUSTED_DEVICE_TOKEN,
+  });
+
+  return withNusuk({ ...body, skipAuth: true, skipCaptcha: true }, async (nusuk) => {
+    const res = await nusuk.request("/eh/public/authentication/login", {
+      method: "POST",
+      payload: loginPayload,
+      headers: loginHeaders,
+    });
+
+    // Save the JWT token if login succeeded
+    const token = res.json?.response?.data?.authInfo?.userToken;
+    const otpRequired = res.json?.response?.data?.otpType !== undefined && res.json?.response?.data?.authInfo === null;
+    const intermediateToken = res.json?.response?.data?.token;
+    const transactionId = res.json?.response?.data?.transactionId;
+
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      const existing = readJsonIfExists(authPath, {});
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      // The login response has entityId=null at the authInfo level, but the
+      // JWT payload carries defaultEntityId/defaultEntityTypeId. Extract them
+      // so loadAuth() can set the activeentityid header for authenticated calls.
+      const jwt = parseJwt(token);
+      const entityId = res.json?.response?.data?.authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+      writePrivateJson(authPath, existing);
+    }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: res.json,
+      captchaToken,
+      saved: Boolean(token),
+      otpRequired,
+      transactionId,
+      intermediateToken: otpRequired ? intermediateToken : undefined,
+      timing: res.timing,
+    };
+  });
+}
+
+async function handleVerifyLogin(body = {}) {
+  // Verify OTP after auto-login. Requires the transactionId from the login
+  // response and the OTP code sent to the user's email/phone.
+  const transactionId = body.transactionId;
+  if (!transactionId) throw new Error("transactionId is required (from /login response)");
+  const otpCode = body.otpCode;
+  if (!otpCode) throw new Error("otpCode is required (the OTP sent to email/phone)");
+
+  const system = body.system || "1";
+  const module = body.module || "1";
+
+  // Build the verify payload
+  const verifyPayload = {
+    transactionId,
+    system,
+    module,
+    otpCode,
+  };
+
+  // Generate a fresh otpTimeStamp for the verify request
+  const { buildOtpTimeStamp } = await import("./nusuk-crypto.js");
+  verifyPayload.otpTimeStamp = buildOtpTimeStamp(body.aesKey || process.env.NUSUK_AES_KEY);
+
+  return withNusuk({ ...body, skipAuth: true, skipCaptcha: true }, async (nusuk) => {
+    const res = await nusuk.request("/eh/public/authentication/verifyLogin", {
+      method: "POST",
+      payload: verifyPayload,
+    });
+
+    // Save the JWT token if verification succeeded
+    const token = res.json?.response?.data?.authInfo?.userToken || res.json?.response?.data?.token;
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      const existing = readJsonIfExists(authPath, {});
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      // Extract entity info from the JWT payload (login response has it null
+      // at the authInfo level) so loadAuth() can set the activeentityid header.
+      const jwt = parseJwt(token);
+      const entityId = res.json?.response?.data?.authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId || jwt?.payload?.defaultEntityTypeId || jwt?.payload?.entities?.[0]?.entityTypeId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+      writePrivateJson(authPath, existing);
+    }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: res.json,
+      saved: Boolean(token),
+      timing: res.timing,
+    };
+  });
+}
+
 async function handleCaptchaSolve(body) {
+  const provider = body.provider || (process.env.CAPTCHA_PROVIDER || "capsolver");
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+      siteKey: body.siteKey || process.env.CAPMONSTER_SITE_KEY,
+      pageUrl: body.pageUrl || process.env.CAPMONSTER_PAGE_URL,
+      pageAction: body.pageAction || process.env.CAPMONSTER_PAGE_ACTION,
+    });
+    const token = await solver.solve({
+      version: body.version || 2,
+      type: body.captchaType || "recaptcha",
+      enterprise: body.enterprise || false,
+      timeout: body.timeout || 180000,
+    });
+    return { ok: true, token, provider: "capmonster" };
+  }
+
+  // Default: CapSolver
   requireEnv(["CAPSOLVER_API_KEY"]);
   const solver = new CapSolver({
-    apiKey: process.env.CAPSOLVER_API_KEY,
+    clientKey: process.env.CAPSOLVER_API_KEY,
     siteKey: body.siteKey || process.env.CAPSOLVER_SITE_KEY,
     pageUrl: body.pageUrl || process.env.CAPSOLVER_PAGE_URL,
     pageAction: body.pageAction || process.env.CAPSOLVER_PAGE_ACTION,
   });
   const token = await solver.solve();
-  return { ok: true, token };
+  return { ok: true, token, provider: "capsolver" };
+}
+
+async function handleCaptchaBalance(body = {}) {
+  const provider = body.provider || (process.env.CAPTCHA_PROVIDER || "capsolver");
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+    });
+    const { balance } = await solver.getBalance();
+    return { ok: true, balance, provider: "capmonster" };
+  }
+
+  // CapSolver — use the SDK
+  requireEnv(["CAPSOLVER_API_KEY"]);
+  const capSolver = new CapSolver({
+    clientKey: process.env.CAPSOLVER_API_KEY,
+  });
+  const { balance } = await capSolver.getBalance();
+  return { ok: true, balance, provider: "capsolver" };
 }
 
 async function handleSchedule(body) {
@@ -283,7 +495,7 @@ async function handleSchedule(body) {
     }
 
     const res = await nusuk.request(
-      "/umrah/visa_apis/api/Visa/SendToIssueVisa",
+      "/umrah/groups_apis/api/Groups/SendToIssueVisa",
       { method: "POST", payload }
     );
     return {
@@ -342,7 +554,9 @@ async function captchaTaskStart(options = {}) {
 
   const type = normalizeCaptchaType(options.type || "visa");
   const interval = parseInterval(options.interval, 5000);
-  const endpoint = options.endpoint || process.env.WORKER_URL;
+  // In proxy mode, don't pass endpoint — AuthaWorker constructor picks up
+  // AUTHA_PROXY_URL automatically.
+  const endpoint = options.endpoint || (process.env.AUTHA_PROXY_URL ? undefined : process.env.WORKER_URL);
   const outputPath = options.output || process.env.CAPTCHA_PATH || "captcha.json";
   const strict = options.strict !== false;
 
@@ -385,7 +599,9 @@ async function captchaWatchBounded(options = {}) {
   const type = normalizeCaptchaType(options.type || "visa");
   const interval = parseInterval(options.interval, 5000);
   const maxDuration = Math.min(Number(options.maxDuration) || 60_000, 300_000);
-  const endpoint = options.endpoint || process.env.WORKER_URL;
+  // In proxy mode, don't pass endpoint — AuthaWorker constructor picks up
+  // AUTHA_PROXY_URL automatically.
+  const endpoint = options.endpoint || (process.env.AUTHA_PROXY_URL ? undefined : process.env.WORKER_URL);
   const outputPath = options.output || process.env.CAPTCHA_PATH || "captcha.json";
   const strict = options.strict !== false;
 
@@ -420,6 +636,8 @@ async function captchaWatchBounded(options = {}) {
 const CMD_CATALOG = {
   init:             { args: [],                          description: "Create local config files" },
   login:            { args: ["--system-user", "--type", "--endpoint"], description: "Install latest user credentials" },
+  "login-auto":     { args: ["--capmonster", "--provider", "--username", "--password", "--site-key", "--page-url", "--x-channel", "--trusted-device-token", "--captcha-version", "--captcha-type", "--enterprise"], description: "Auto-login via captcha solver and save JWT" },
+  "verify-login":   { args: ["--transaction-id", "--otp", "--system", "--module"], description: "Verify OTP after auto-login" },
   logout:           { args: [],                          description: "Clear local auth/captcha/entity state" },
   pull:             { args: ["--entity", "--type", "--endpoint"], description: "Refresh auth, entity, and CAPTCHA" },
   info:             { args: [],                          description: "Show dashboard company info" },
@@ -436,7 +654,8 @@ const CMD_CATALOG = {
   "captcha-pull":   { args: ["--entity", "--type", "--endpoint", "--output", "--quiet"], description: "Pull one CAPTCHA" },
   "captcha-set":    { args: ["--type", "--token"],       description: "Save a CAPTCHA token" },
   "captcha-show":   { args: [],                          description: "Show the saved token" },
-  "captcha-solve":  { args: ["--v3", "--type"],          description: "Solve CAPTCHA via CapSolver" },
+  "captcha-solve":  { args: ["--v3", "--type", "--capmonster", "--enterprise", "--turnstile"], description: "Solve CAPTCHA via CapSolver (default) or CapMonster (--capmonster)" },
+  "captcha-balance": { args: ["--capmonster"],                   description: "Check solver account balance" },
   "captcha-watch":  { args: ["--entity", "--type", "--interval", "--max-duration", "--endpoint", "--output"], description: "Watch CAPTCHA for a bounded duration (in-process)" },
   "captcha-start":  { args: ["--entity", "--type", "--interval", "--endpoint", "--output"], description: "Start in-process background CAPTCHA refresher" },
   "captcha-status": { args: [],                          description: "Show background refresher status" },
@@ -647,12 +866,36 @@ const API_DOCS = [
     response: { ok: true, status: 200, groups: "[{ id, name }]", raw: "(if raw=true)" },
   },
   {
+    method: "POST", path: "/login",
+    description: "Auto-login to Nusuk: solves a CAPTCHA, encrypts credentials (AES-128-CBC), sends /eh/public/authentication/login, saves JWT to auth.json",
+    auth: "CAPMONSTER_API_KEY or CAPSOLVER_API_KEY env var",
+    body: { username: "string (required — login email)", password: "string (required — login password)", provider: "string (optional: capmonster|capsolver, default: capmonster)", xChannel: "string (optional)", trustedDeviceToken: "string (optional)", siteKey: "string (optional)", pageUrl: "string (optional)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/login -H "Content-Type: application/json" -d \'{"username":"user@email.com","password":"pass123","provider":"capmonster"}\'',
+    response: { ok: true, status: 200, data: "{ ...login response }", captchaToken: "solved-captcha", saved: true, timing: "{ total, ttfb }" },
+  },
+  {
+    method: "POST", path: "/verify-login",
+    description: "Verify OTP after auto-login. Sends authentication/verifyLogin with the transactionId and OTP code, saves the final JWT to auth.json.",
+    auth: "none (uses browser session from /login)",
+    body: { transactionId: "string (required — from /login response)", otpCode: "string (required — 4-digit OTP sent to email/phone)", system: "string (optional, default: 1)", module: "string (optional, default: 1)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/verify-login -H "Content-Type: application/json" -d \'{"transactionId":"abc-123","otpCode":"1234"}\'',
+    response: { ok: true, status: 200, data: "{ ...verify response with authInfo.userToken }", saved: true, timing: "{ total, ttfb }" },
+  },
+  {
     method: "POST", path: "/captcha/solve",
-    description: "Solve a CAPTCHA via CapSolver",
-    auth: "CAPSOLVER_API_KEY env var",
-    body: { siteKey: "string (optional)", pageUrl: "string (optional)", pageAction: "string (optional)" },
-    example: 'curl -X POST https://toque.decloud.workers.dev/captcha/solve -H "Content-Type: application/json" -d \'{}\'',
-    response: { ok: true, token: "captcha-token-string" },
+    description: "Solve a CAPTCHA via CapSolver (default) or CapMonster Cloud (--capmonster)",
+    auth: "CAPSOLVER_API_KEY or CAPMONSTER_API_KEY env var",
+    body: { provider: "string (optional: capsolver|capmonster)", version: "number (optional: 2|3, default 2)", captchaType: "string (optional: recaptcha|turnstile|visa|login|general)", enterprise: "boolean (optional)", siteKey: "string (optional)", pageUrl: "string (optional)", pageAction: "string (optional)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/captcha/solve -H "Content-Type: application/json" -d \'{"provider":"capmonster","version":2}\'',
+    response: { ok: true, token: "captcha-token-string", provider: "capmonster" },
+  },
+  {
+    method: "POST", path: "/captcha/balance",
+    description: "Check captcha solver account balance (CapSolver or CapMonster Cloud)",
+    auth: "CAPSOLVER_API_KEY or CAPMONSTER_API_KEY env var",
+    body: { provider: "string (optional: capsolver|capmonster)" },
+    example: 'curl -X POST https://toque.decloud.workers.dev/captcha/balance -H "Content-Type: application/json" -d \'{"provider":"capmonster"}\'',
+    response: { ok: true, balance: 1.50, provider: "capmonster" },
   },
   {
     method: "POST", path: "/schedule",
@@ -721,7 +964,10 @@ const ROUTES = {
   "/api": handleApi,
   "/request": handleRequest,
   "/groups": handleGroups,
+  "/login": handleAutoLogin,
+  "/verify-login": handleVerifyLogin,
   "/captcha/solve": handleCaptchaSolve,
+  "/captcha/balance": handleCaptchaBalance,
   "/schedule": handleSchedule,
   "/schedule/workflow": handleSchedule,
   "/api-list": handleListApis,

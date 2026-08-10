@@ -11,9 +11,11 @@ import { Nusuk } from "../src/nusuk.js";
 import { AuthaWorker } from "../src/worker.js";
 import { parseJwt } from "../src/jwt.js";
 import { CapSolver } from "../src/capsolver.js";
+import { CapMonsterSolver } from "../src/capmonster.js";
 import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
 import { computeSendSchedule } from "../src/scheduling.js";
 import { buildVisaPayload } from "../src/visa-payload.js";
+import { buildLoginRequest, DEFAULT_TRUSTED_DEVICE_TOKEN } from "../src/nusuk-crypto.js";
 import { summarizeRequestTiming } from "../src/timing.js";
 import { writePrivateJson, ms, formatTime } from "../src/utils.js";
 import {
@@ -556,6 +558,179 @@ async function cmdLogin(args) {
   if (!result.token) process.exitCode = 1;
 }
 
+async function cmdAutoLogin(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const provider = args.includes("--capmonster") ? "capmonster" : (getArg("--provider") || process.env.CAPTCHA_PROVIDER || "capmonster");
+  const siteKey = getArg("--site-key") || process.env.CAPTCHA_SITE_KEY || process.env.CAPMONSTER_SITE_KEY || "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";
+  const pageUrl = getArg("--page-url") || process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/pub/login";
+  const xChannel = getArg("--x-channel") || process.env.X_CHANNEL || "ZlEW8G0jE195d1hY+hvN6/0T9KljTFeVg798I3V1t6I=";
+  const trustedDeviceToken = getArg("--trusted-device-token") || process.env.TRUSTED_DEVICE_TOKEN || DEFAULT_TRUSTED_DEVICE_TOKEN;
+  const username = getArg("--username") || getArg("--user") || process.env.NUSUK_USERNAME;
+  const password = getArg("--password") || getArg("--pass") || process.env.NUSUK_PASSWORD;
+  const aesKey = getArg("--aes-key") || process.env.NUSUK_AES_KEY;
+  const captchaVersion = Number(getArg("--captcha-version") || 2);
+  const captchaType = getArg("--captcha-type") || "recaptcha";
+  const enterprise = args.includes("--enterprise");
+
+  if (!username || !password) {
+    throw new Error("Username and password are required. Pass --username <email> --password <pass> or set NUSUK_USERNAME/NUSUK_PASSWORD env vars");
+  }
+
+  console.log(`Auto-login via ${provider}...`);
+  console.log(`  site key : ${siteKey}`);
+  console.log(`  page url : ${pageUrl}`);
+  console.log(`  username : ${username}`);
+
+  // Step 1: Solve the captcha
+  let captchaToken;
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+      siteKey,
+      pageUrl,
+      pageAction: getArg("--page-action") || process.env.CAPMONSTER_PAGE_ACTION,
+    });
+    console.log("  solving captcha via CapMonster Cloud...");
+    captchaToken = await solver.solve({
+      version: captchaVersion,
+      type: captchaType,
+      enterprise,
+      timeout: 180000,
+    });
+  } else {
+    if (!process.env.CAPSOLVER_API_KEY) throw new Error("CAPSOLVER_API_KEY is required");
+    const solver = new CapSolver({
+      clientKey: process.env.CAPSOLVER_API_KEY,
+      siteKey,
+      pageUrl,
+      pageAction: getArg("--page-action") || process.env.CAPSOLVER_PAGE_ACTION,
+    });
+    console.log("  solving captcha via CapSolver...");
+    captchaToken = await solver.solve();
+  }
+  console.log(`  captcha  : ${captchaToken.slice(0, 40)}...`);
+
+  // Step 2: Build login payload and headers using Nusuk's encryption
+  const { payload: loginPayload, headers: loginHeaders } = buildLoginRequest({
+    username,
+    password,
+    captchaToken,
+    key: aesKey,
+    xChannel,
+    trustedDeviceToken,
+  });
+  console.log(`  otp      : ${loginPayload.otpTimeStamp.slice(0, 30)}...`);
+  console.log(`  auth     : ${loginHeaders.authorization.slice(0, 30)}...`);
+
+  // Step 3: Send the login request (skip auth — no JWT yet)
+  console.log("  sending login request...");
+  const nusuk = new Nusuk({
+    referer: "https://masar.nusuk.sa/pub/login",
+  });
+  await nusuk.init();
+  try {
+    const res = await nusuk.request("/eh/public/authentication/login", {
+      method: "POST",
+      payload: loginPayload,
+      headers: loginHeaders,
+    });
+    console.log(`  status   : ${res.status}`);
+    if (res.timing) console.log(`  timing   :`, res.timing);
+
+    // Step 4: Save the JWT token if login succeeded
+    const token = res.json?.response?.data?.authInfo?.userToken;
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      let existing = {};
+      try { existing = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+      writePrivateJson(authPath, existing);
+      console.log(`  auth     : valid JWT saved to ${authPath}`);
+      if (entityId) console.log(`  entity   : ${entityId}`);
+    } else {
+      console.log(`  auth     : no token in response`);
+      process.exitCode = 1;
+    }
+    if (res.json) console.log(`  body     :`, JSON.stringify(res.json, null, 2));
+    else console.log(`  body     :`, res.body);
+  } finally {
+    await nusuk.close();
+  }
+}
+
+async function cmdVerifyLogin(args) {
+  const getArg = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const transactionId = getArg("--transaction-id") || getArg("--transaction");
+  const otpCode = getArg("--otp") || getArg("--code");
+  const system = getArg("--system") || "1";
+  const module = getArg("--module") || "1";
+
+  if (!transactionId) throw new Error("Transaction ID is required. Pass --transaction-id <id> (from login-auto response)");
+  if (!otpCode) throw new Error("OTP code is required. Pass --otp <4-digit-code>");
+
+  console.log(`Verifying OTP...`);
+  console.log(`  transaction : ${transactionId}`);
+  console.log(`  otp code    : ${otpCode}`);
+
+  const { buildOtpTimeStamp } = await import("../src/nusuk-crypto.js");
+  const verifyPayload = {
+    transactionId,
+    system,
+    module,
+    otpCode,
+    otpTimeStamp: buildOtpTimeStamp(),
+  };
+
+  const nusuk = new Nusuk({ referer: "https://masar.nusuk.sa/pub/login" });
+  await nusuk.init();
+  try {
+    const res = await nusuk.request("/eh/public/authentication/verifyLogin", {
+      method: "POST",
+      payload: verifyPayload,
+    });
+    console.log(`  status      : ${res.status}`);
+    if (res.timing) console.log(`  timing      :`, res.timing);
+
+    const token = res.json?.response?.data?.authInfo?.userToken || res.json?.response?.data?.token;
+    if (token) {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      let existing = {};
+      try { existing = JSON.parse(readFileSync(authPath, "utf8")); } catch { /* ignore */ }
+      existing.response = existing.response || { data: { authInfo: {} } };
+      existing.response.data = existing.response.data || { authInfo: {} };
+      existing.response.data.authInfo = existing.response.data.authInfo || {};
+      existing.response.data.authInfo.userToken = token;
+      const entityId = res.json?.response?.data?.authInfo?.entityId;
+      if (entityId) existing.response.data.authInfo.entityId = entityId;
+      const entityTypeId = res.json?.response?.data?.authInfo?.entityTypeId;
+      if (entityTypeId) existing.response.data.authInfo.entityTypeId = entityTypeId;
+      writePrivateJson(authPath, existing);
+      console.log(`  auth        : valid JWT saved to ${authPath}`);
+      if (entityId) console.log(`  entity      : ${entityId}`);
+    } else {
+      console.log(`  auth        : no token in response`);
+      process.exitCode = 1;
+    }
+    if (res.json) console.log(`  body        :`, JSON.stringify(res.json, null, 2));
+    else console.log(`  body        :`, res.body);
+  } finally {
+    await nusuk.close();
+  }
+}
+
 async function cmdPull(args) {
   const getArg = (flag) => {
     const i = args.indexOf(flag);
@@ -670,36 +845,34 @@ async function cmdBench(args) {
     console.log(`Sending ${count} test requests...\n`);
     const samples = [];
     for (let i = 0; i < count; i++) {
-      const res = await nusuk.request("/manifest.json");
+      const res = await nusuk.request("/manifest.json", { cacheBust: true });
       const t = res.timing;
       samples.push(t);
       console.log(`  req ${i + 1}: total=${ms(t.total)}  ttfb=${ms(t.ttfb ?? "?")}  status=${res.status}`);
     }
 
     const totals = samples.map((s) => s.total);
-    const ttfbVals = samples.map((s) => s.ttfb).filter(Boolean);
+    const ttfbVals = samples.map((s) => s.ttfb).filter((v) => v != null && v > 0);
     const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
     const min = (arr) => Math.min(...arr);
-
-    const realTtfb = ttfbVals.filter((v) => v > 2);
-    const minTtfb = realTtfb.length ? min(realTtfb) : (ttfbVals.length ? min(ttfbVals) : null);
-    const avgTtfb = ttfbVals.length ? avg(ttfbVals) : null;
-    const netOneWay = minTtfb ? Math.round(minTtfb / 2) : null;
+    const max = (arr) => Math.max(...arr);
 
     console.log(`\n--- Latency Stats ---`);
-    console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(Math.max(...totals))}`);
+    console.log(`  total RTT  : min=${ms(min(totals))}  avg=${ms(avg(totals))}  max=${ms(max(totals))}`);
     if (ttfbVals.length) {
-      const filtered = realTtfb.length < ttfbVals.length ? ` (${realTtfb.length}/${ttfbVals.length} real)` : "";
-      console.log(`  ttfb       : min=${ms(minTtfb)}  avg=${ms(avgTtfb)}  max=${ms(Math.max(...ttfbVals))}${filtered}`);
-      if (realTtfb.length) {
-        console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
-      }
-    }
-    if (netOneWay) {
+      console.log(`  ttfb       : min=${ms(min(ttfbVals))}  avg=${ms(avg(ttfbVals))}  max=${ms(max(ttfbVals))}  (${ttfbVals.length}/${count} samples)`);
+      const minTtfb = min(ttfbVals);
+      const avgTtfb = avg(ttfbVals);
+      console.log(`  server proc: ${ms(avgTtfb - minTtfb)}  (avg ttfb - min ttfb)`);
+      const netOneWay = Math.round(minTtfb / 2);
       console.log(`  net 1-way  : ${ms(netOneWay)}  (min ttfb ÷ 2)  <-- request delivery`);
+      const oneway = netOneWay || Math.round(avg(totals) / 2);
+      console.log(`  one-way ~  : ${ms(oneway)}`);
+    } else {
+      console.log(`  ttfb       : (no resource timing entries — enable cacheBust or check browser)`);
+      const oneway = Math.round(avg(totals) / 2);
+      console.log(`  one-way ~  : ${ms(oneway)}`);
     }
-    const oneway = netOneWay || Math.round(avg(totals) / 2);
-    console.log(`  one-way ~  : ${ms(oneway)}`);
   } finally {
     await nusuk.close();
   }
@@ -915,19 +1088,59 @@ async function cmdCaptchaShow() {
 
 async function cmdCaptchaSolve(args) {
   const version = args.includes("--v3") ? 3 : 2;
-  const solver = new CapSolver();
-  console.log(`Solving reCAPTCHA v${version} via CapSolver (${solver.pageUrl})...`);
-  const start = Date.now();
   const type = args.includes("--type") ? args[args.indexOf("--type") + 1] : "visa";
+  const provider = args.includes("--capmonster") ? "capmonster" : "capsolver";
+  const enterprise = args.includes("--enterprise");
+  const turnstile = args.includes("--turnstile");
+  const normalizedType = normalizeCaptchaType(type);
+  const start = Date.now();
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver();
+    const captchaType = turnstile ? "turnstile" : "recaptcha";
+    console.log(`Solving ${turnstile ? "Turnstile" : `reCAPTCHA v${version}${enterprise ? " Enterprise" : ""}`} via CapMonster Cloud (${solver.pageUrl})...`);
+    const token = await solver.solve({
+      version,
+      type: captchaType,
+      enterprise,
+      timeout: 180000,
+    });
+    writeCaptchaToken(token, normalizedType);
+    console.log(`\n  captcha token saved (${normalizedType}, ${((Date.now() - start) / 1000).toFixed(1)}s)`);
+    console.log(`  token: ${token.slice(0, 28)}...`);
+    return;
+  }
+
+  // Default: CapSolver
+  const solver = new CapSolver();
+  const captchaType = turnstile ? "turnstile" : "recaptcha";
+  console.log(`Solving ${turnstile ? "Turnstile" : `reCAPTCHA v${version}${enterprise ? " Enterprise" : ""}`} via CapSolver (${solver.pageUrl})...`);
   const token = await solver.solve({
     version,
-    onStatus: (res) =>
-      console.log(`  status: ${res.status || "unknown"} (${((Date.now() - start) / 1000).toFixed(1)}s)`),
+    type: captchaType,
+    enterprise,
   });
-  const normalizedType = normalizeCaptchaType(type);
   writeCaptchaToken(token, normalizedType);
   console.log(`\n  captcha token saved (${normalizedType}, ${((Date.now() - start) / 1000).toFixed(1)}s)`);
   console.log(`  token: ${token.slice(0, 28)}...`);
+}
+
+async function cmdCaptchaBalance(args) {
+  const provider = args.includes("--capmonster") ? "capmonster" : "capsolver";
+
+  if (provider === "capmonster") {
+    const solver = new CapMonsterSolver();
+    console.log("Checking CapMonster Cloud balance...");
+    const { balance } = await solver.getBalance();
+    console.log(`  CapMonster Cloud balance: $${balance}`);
+    return;
+  }
+
+  // CapSolver — use the SDK
+  const solver = new CapSolver();
+  console.log("Checking CapSolver balance...");
+  const { balance } = await solver.getBalance();
+  console.log(`  CapSolver balance: $${balance}`);
 }
 
 function captchaPullOptions(args) {
@@ -1062,8 +1275,9 @@ async function cmdCaptcha(args) {
     case "set": return cmdCaptchaSet(rest);
     case "show": return cmdCaptchaShow();
     case "solve": return cmdCaptchaSolve(rest);
+    case "balance": return cmdCaptchaBalance(rest);
     case "help": help("captcha"); return;
-    default: throw new Error("Usage: nusuk captcha <pull|watch|start|status|stop|set|show|solve>");
+    default: throw new Error("Usage: nusuk captcha <pull|watch|start|status|stop|set|show|solve|balance>");
   }
 }
 
@@ -1282,7 +1496,7 @@ async function cmdSendVisa(args) {
   if (!groupId) {
     groupId = process.env.GROUP_ID || null;
   }
-  if (!groupId && canPrompt()) {
+  if (!groupId) {
     groupId = readStoredGroupId() || null;
   }
   if (typeof groupId === "string") groupId = groupId.trim();
@@ -1508,7 +1722,8 @@ Actions:
   stop                  Stop the background refresher
   set [token]           Save a CAPTCHA token
   show                  Show the saved token
-  solve [--v3]          Solve via CapSolver
+  solve [--v3]          Solve via CapSolver (default) or CapMonster (--capmonster)
+  balance               Check solver account balance (--capmonster for CapMonster)
 
 Options:
   --type <type>         visa, login, or general (default: visa)
@@ -1530,6 +1745,8 @@ Usage: nusuk <command> [options]
 Common tasks:
   init                  Create ignored local config files after a fresh clone
   login                 Install the latest user credentials
+  login-auto            Auto-login via captcha solver and save JWT
+  verify-login          Verify OTP after auto-login (requires transaction ID)
   logout                Clear local auth, captcha, and entity state
   pull                  Refresh auth, entity, and CAPTCHA files
   info                  Show dashboard company information
@@ -1551,6 +1768,8 @@ Help:
 
 Examples:
   nusuk login
+  nusuk login-auto --username user@email.com --password pass123
+  nusuk verify-login --transaction-id <id> --otp 1234
   nusuk info
   nusuk send 12345
   nusuk api verify-subscription
@@ -1661,6 +1880,9 @@ async function main() {
     case "captcha-solve":
       await cmdCaptchaSolve(args);
       break;
+    case "captcha-balance":
+      await cmdCaptchaBalance(args);
+      break;
     case "captcha":
       await cmdCaptcha(args);
       break;
@@ -1672,6 +1894,13 @@ async function main() {
       break;
     case "login":
       await cmdLogin(args);
+      break;
+    case "login-auto":
+    case "autologin":
+      await cmdAutoLogin(args);
+      break;
+    case "verify-login":
+      await cmdVerifyLogin(args);
       break;
     case "workflow":
       await cmdWorkflow(args);

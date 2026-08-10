@@ -13,27 +13,46 @@ import { jsonResponse } from "./utils.js";
 
 export class ToqueContainer extends Container {
   defaultPort = 8080;
-  sleepAfter = "60s";
+  // Keep the container always active (no scale-to-zero) so SSH sessions,
+  // scheduled tasks, and requests have no cold-start delay.
+  sleepAfter = "99999h";
+  // Ensure the container has outbound internet access (enabled by default,
+  // but made explicit here for clarity — the Nusuk API needs it).
+  enableInternet = true;
 
   // Pass Worker vars to the container as environment variables.
   // ACTIVE_ENTITY_ID and SYSTEM_USER_ID are NOT hardcoded here — they are
   // auto-filled by running `nusuk login` or `nusuk pull` via /cmd, which
   // saves them to entity.json inside the container's filesystem.
+  //
+  // AUTHA_PROXY_URL: when set, the container's AuthaWorker client routes
+  // auth/captcha pulls through this Worker's /autha/* service-binding proxy
+  // instead of calling the autha-worker over the public internet. The Worker
+  // injects WORKER_API_TOKEN via the binding, so the container doesn't need
+  // to send it. Falls back to WORKER_URL (direct) when unset.
   envVars = {
     WORKER_URL: env.WORKER_URL,
     WORKER_API_TOKEN: env.WORKER_API_TOKEN,
+    AUTHA_PROXY_URL: env.AUTHA_PROXY_URL || (env.TOQUE_WORKER_URL ? `${env.TOQUE_WORKER_URL}/autha` : ""),
+    CAPMONSTER_API_KEY: env.CAPMONSTER_API_KEY,
+    CAPSOLVER_API_KEY: env.CAPSOLVER_API_KEY,
   };
 
   onStart() {
-    console.log("Toque container started");
+    console.log(JSON.stringify({ message: "toque container started" }));
   }
 
   onStop() {
-    console.log("Toque container stopped");
+    console.log(JSON.stringify({ message: "toque container stopped" }));
   }
 
   onError(error) {
-    console.error("Toque container error:", error);
+    console.error(
+      JSON.stringify({
+        message: "toque container error",
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
   }
 }
 
@@ -132,6 +151,13 @@ async function authenticate(request, url) {
       await jwtVerify(accessJwt, jwks, verifyOptions);
       return null; // valid Access token
     } catch (err) {
+      console.error(
+        JSON.stringify({
+          message: "invalid Cloudflare Access token",
+          path: url.pathname,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
       return jsonResponse(403, {
         ok: false,
         error: "Invalid Cloudflare Access token",
@@ -143,8 +169,14 @@ async function authenticate(request, url) {
   // 2. API key fallback (X-API-Key header for scripts/curl)
   if (env.TOQUE_API_KEY) {
     const apiKey = request.headers.get("X-API-Key");
-    if (apiKey && apiKey === env.TOQUE_API_KEY) {
-      return null; // valid API key
+    if (apiKey) {
+      // Timing-safe comparison to prevent timing side-channel attacks
+      const provided = new TextEncoder().encode(apiKey);
+      const expected = new TextEncoder().encode(env.TOQUE_API_KEY);
+      if (provided.length === expected.length) {
+        const valid = await crypto.subtle.timingSafeEqual(provided, expected);
+        if (valid) return null; // valid API key
+      }
     }
   }
 
@@ -374,9 +406,19 @@ const API_DOCS = [
   },
   {
     method: "ANY",
+    path: "/autha/*",
+    description:
+      "Internal proxy to the autha-worker via a service binding. " +
+      "The /autha/ prefix is stripped before forwarding (e.g. /autha/api/entity/123/context → /api/entity/123/context). " +
+      "The WORKER_API_TOKEN is injected automatically by the Worker, so callers don't need to send it. " +
+      "Used by the container to pull auth/captcha without a public internet round-trip.",
+    auth: "internal (container → Worker → service binding)",
+  },
+  {
+    method: "ANY",
     path: "/* (all other paths)",
     description:
-      "All other requests are proxied to the Toque container, which handles: /pull, /info, /send, /api, /request, /groups, /captcha/solve, /schedule, /cmd, /cmd/list, /api-list, /health",
+      "All other requests are proxied to the Toque container, which handles: /pull, /info, /send, /api, /request, /groups, /login, /verify-login, /captcha/solve, /captcha/balance, /schedule, /cmd, /cmd/list, /api-list, /health",
     note: "See the container's /help endpoint for full docs: curl https://toque.decloud.workers.dev/help",
   },
 ];
@@ -410,13 +452,64 @@ async function handleWorkflowRoutes(url, request) {
   return null;
 }
 
+/**
+ * Proxy /autha/* requests to the autha-worker via a service binding.
+ *
+ * The service binding (env.AUTHA_WORKER) sends requests directly within
+ * Cloudflare's network — no public internet round-trip. The /autha/ prefix
+ * is stripped, so `/autha/api/entity/123/context` becomes
+ * `/api/entity/123/context` on the autha-worker.
+ *
+ * The WORKER_API_TOKEN is injected automatically from the Worker's secret,
+ * so the container doesn't need to send it over the network. If the
+ * incoming request already has an Authorization header, it's preserved
+ * (allows the CLI to use its own token when running locally).
+ */
+function proxyToAuthaWorker(request, url) {
+  if (!env.AUTHA_WORKER) {
+    return jsonResponse(500, {
+      ok: false,
+      error: "AUTHA_WORKER service binding not configured",
+    });
+  }
+
+  // Strip the /autha/ prefix
+  const targetPath = url.pathname.replace(/^\/autha/, "") + url.search;
+
+  // Build the forwarded request — preserve method, body, and most headers
+  const headers = new Headers(request.headers);
+  // Inject the API token if not already present
+  if (!headers.has("Authorization") && env.WORKER_API_TOKEN) {
+    headers.set("Authorization", `Bearer ${env.WORKER_API_TOKEN}`);
+  }
+
+  const proxyRequest = new Request(
+    new URL(targetPath, "https://autha-worker.internal"),
+    {
+      method: request.method,
+      headers,
+      body: request.method !== "GET" && request.method !== "HEAD" ? request.body : null,
+      redirect: "manual",
+    }
+  );
+
+  return env.AUTHA_WORKER.fetch(proxyRequest);
+}
+
 export default {
-  async fetch(request) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     // --- Authentication (Cloudflare Access / API key) ---
-    const authError = await authenticate(request, url);
-    if (authError) return authError;
+    // Skip auth for the internal /autha/ proxy path — the container calls
+    // this proxy to reach the autha-worker, and the proxy injects the
+    // WORKER_API_TOKEN via the service binding. The container itself has no
+    // X-API-Key to send (it's internal), so auth would block it.
+    const isAuthaProxy = url.pathname.startsWith("/autha/");
+    if (!isAuthaProxy) {
+      const authError = await authenticate(request, url);
+      if (authError) return authError;
+    }
 
     // --- Help / API docs (GET / and GET /help) ---
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/help")) {
@@ -432,6 +525,16 @@ export default {
     const workflowResponse = await handleWorkflowRoutes(url, request);
     if (workflowResponse) return workflowResponse;
 
+    // --- Autha-worker proxy (service binding) ---
+    // Forwards /autha/* requests to the autha-worker via a service binding,
+    // so the container can reach it within Cloudflare's network instead of
+    // over the public internet. The /autha/ prefix is stripped before
+    // forwarding. The container's AuthaWorker client points WORKER_URL at
+    // this Worker's /autha path when AUTHA_PROXY_MODE is set.
+    if (url.pathname.startsWith("/autha/")) {
+      return proxyToAuthaWorker(request, url);
+    }
+
     // --- Proxy everything else to the Toque container ---
     if (!env.TOQUE_CONTAINER) {
       return jsonResponse(500, { ok: false, error: "TOQUE_CONTAINER binding not configured" });
@@ -439,8 +542,31 @@ export default {
 
     try {
       const container = env.TOQUE_CONTAINER.getByName("toque");
-      return await container.fetch(request);
+      // Clone the request so the original body stream stays intact for the proxy
+      const response = await container.fetch(new Request(request));
+      // Log proxy errors in the background without blocking the response
+      if (!response.ok) {
+        ctx.waitUntil(
+          Promise.resolve().then(() =>
+            console.error(
+              JSON.stringify({
+                message: "container proxy returned non-ok status",
+                path: url.pathname,
+                status: response.status,
+              })
+            )
+          )
+        );
+      }
+      return response;
     } catch (err) {
+      console.error(
+        JSON.stringify({
+          message: "container proxy failed",
+          path: url.pathname,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
       return jsonResponse(500, { ok: false, error: err.message });
     }
   },
