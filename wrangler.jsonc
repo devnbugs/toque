@@ -32,10 +32,6 @@
     "mode": "smart"
   },
   "preview_urls": false,
-  "assets": {
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
   "containers": [
     {
       "class_name": "ToqueContainer",
