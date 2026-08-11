@@ -506,6 +506,16 @@ export default {
       if (authError) return authError;
     }
 
+    // --- Operator dashboard assets ---
+    // The dashboard is protected by the same Worker auth as the API. The shell
+    // is mounted at /dashboard while its static files remain cacheable assets.
+    if (env.ASSETS && request.method === "GET" && url.pathname === "/dashboard") {
+      return env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
+    }
+    if (env.ASSETS && request.method === "GET" && ["/styles.css", "/app.js"].includes(url.pathname)) {
+      return env.ASSETS.fetch(request);
+    }
+
     // --- Help / API docs (GET / and GET /help) ---
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/help")) {
       return jsonResponse(200, {

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b1018" />
+    <title>Toque Operations</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">T</span><div><strong>toque</strong><small>operations console</small></div></div>
+        <nav aria-label="Primary navigation">
+          <a class="nav-link active" href="#overview">Overview</a>
+          <a class="nav-link" href="#groups">Groups</a>
+          <a class="nav-link" href="#requests">Requests</a>
+          <a class="nav-link" href="#access">Access</a>
+        </nav>
+        <div class="sidebar-foot"><span class="dot"></span> Connected to Worker</div>
+      </aside>
+      <main class="main">
+        <header class="topbar"><div><p class="eyebrow">CONTROL PLANE / PRODUCTION</p><h1>Operations overview</h1></div><button class="button secondary" id="refreshAll">Refresh data</button></header>
+        <section class="status-grid" id="overview">
+          <article class="status-card"><div class="card-label">Worker status</div><div class="status-value"><span class="status-dot" id="healthDot"></span><span id="healthText">Checking…</span></div><p id="healthMeta">Verifying service availability</p></article>
+          <article class="status-card"><div class="card-label">Active entity</div><div class="status-value" id="entityValue">Not loaded</div><p>Context from the latest pull</p></article>
+          <article class="status-card"><div class="card-label">Last operation</div><div class="status-value" id="lastOperation">None yet</div><p id="lastOperationMeta">Your activity appears here</p></article>
+        </section>
+        <section class="panel access-panel" id="access"><div class="panel-heading"><div><p class="eyebrow">AUTHENTICATION</p><h2>Refresh service context</h2></div><span class="badge">Protected</span></div><p class="muted">Pull the latest credentials, entity context, and CAPTCHA state from the auth service.</p><div class="inline-actions"><button class="button primary" id="pullButton">Pull context</button><button class="button secondary" id="refreshTokenButton">Refresh token</button></div><div class="result" id="pullResult" hidden></div></section>
+        <section class="two-col">
+          <article class="panel" id="groups"><div class="panel-heading"><div><p class="eyebrow">NUSUK DATA</p><h2>Groups</h2></div><button class="icon-button" id="groupsButton" aria-label="Refresh groups">↻</button></div><div class="table-wrap"><table><thead><tr><th>Group</th><th>ID</th><th></th></tr></thead><tbody id="groupsBody"><tr><td colspan="3" class="empty">Load groups to see available records.</td></tr></tbody></table></div><div class="pager"><button class="button text-button" id="prevGroups">Previous</button><span id="pageLabel">Page 1</span><button class="button text-button" id="nextGroups">Next</button></div></article>
+          <article class="panel" id="requests"><div class="panel-heading"><div><p class="eyebrow">API CATALOG</p><h2>Saved requests</h2></div><button class="icon-button" id="requestsButton" aria-label="Refresh requests">↻</button></div><label class="field-label" for="requestSelect">Request</label><select id="requestSelect"><option value="">Load catalog…</option></select><label class="field-label" for="groupId">Group ID</label><input id="groupId" placeholder="Select a group or enter an ID" /><label class="field-label" for="payload">Payload <span>(optional JSON)</span></label><textarea id="payload" rows="4" placeholder="{}"></textarea><button class="button primary full" id="runRequest">Run request</button><div class="result" id="requestResult" hidden></div></article>
+        </section>
+        <section class="panel history-panel"><div class="panel-heading"><div><p class="eyebrow">ACTIVITY</p><h2>Recent operations</h2></div><button class="button text-button" id="clearHistory">Clear</button></div><div id="history" class="history"><div class="empty">No operations recorded in this session.</div></div></section>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
