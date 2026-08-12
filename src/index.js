@@ -36,21 +36,12 @@ export class ToqueContainer extends Container {
   // instead of calling the autha-worker over the public internet. The Worker
   // injects WORKER_API_TOKEN via the binding, so the container doesn't need
   // to send it. Falls back to WORKER_URL (direct) when unset.
-  //
-  // R2_* vars: when R2_BUCKET_NAME is set, the container's startup script
-  // mounts the R2 bucket at /mnt/r2 via tigrisfs (FUSE). This lets the
-  // container read/write R2 objects as local files without S3 API calls.
   envVars = {
     WORKER_URL: env.WORKER_URL,
     WORKER_API_TOKEN: env.WORKER_API_TOKEN,
     AUTHA_PROXY_URL: env.AUTHA_PROXY_URL || (env.TOQUE_WORKER_URL ? `${env.TOQUE_WORKER_URL}/autha` : ""),
     CAPMONSTER_API_KEY: env.CAPMONSTER_API_KEY,
     CAPSOLVER_API_KEY: env.CAPSOLVER_API_KEY,
-    // R2 FUSE mount (tigrisfs) — all optional; mount is skipped if unset
-    R2_BUCKET_NAME: env.R2_BUCKET_NAME,
-    R2_ACCOUNT_ID: env.R2_ACCOUNT_ID,
-    R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
-    R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
   };
 
   onStart() {
@@ -619,7 +610,7 @@ export default {
       return jsonResponse(200, {
         ok: true,
         service: "toque-worker",
-        baseUrl: "https://toque.decloud.workers.dev",
+        baseUrl: url.origin,
         endpoints: API_DOCS,
       });
     }
