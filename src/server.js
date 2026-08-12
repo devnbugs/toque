@@ -25,6 +25,7 @@ import { parsePositiveCount, parseTargetTime } from "./validation.js";
 import { pullCaptchaOnce, runCaptchaPullLoop, normalizeCaptchaType, parseInterval } from "./captcha-puller.js";
 import { jsonResponse, writePrivateJson, readJsonIfExists } from "./utils.js";
 import { log } from "./log.js";
+import { getNusukPool } from "./nusuk-pool.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -104,13 +105,51 @@ function buildNusuk(body = {}) {
 }
 
 async function withNusuk(body, callback) {
-  const nusuk = buildNusuk(body);
-  await nusuk.init();
-  try {
-    return await callback(nusuk);
-  } finally {
-    await nusuk.close();
-  }
+  const pool = getNusukPool({
+    baseUrl: body.baseUrl || process.env.NUSUK_BASE_URL,
+    origin: body.origin || process.env.NUSUK_ORIGIN,
+    referer: body.referer || process.env.NUSUK_REFERER,
+    authToken: body.authToken || process.env.AUTH_TOKEN || process.env.NUSUK_AUTH_TOKEN,
+    skipAuth: body.skipAuth === true,
+    activeEntityId: body.activeEntityId || process.env.ACTIVE_ENTITY_ID,
+    activeEntityTypeId: body.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID,
+    captchaType: body.captchaType || process.env.CAPTCHA_TYPE || "visa",
+    captchaToken: body.captchaToken || process.env.CAPTCHA_TOKEN,
+    skipCaptcha: body.skipCaptcha === true,
+  });
+  return pool.withNusuk(callback);
+}
+
+// ---------------------------------------------------------------------------
+// Pool management endpoints
+// ---------------------------------------------------------------------------
+
+async function handleWarm(body) {
+  const pool = getNusukPool({
+    baseUrl: body.baseUrl || process.env.NUSUK_BASE_URL,
+    origin: body.origin || process.env.NUSUK_ORIGIN,
+    referer: body.referer || process.env.NUSUK_REFERER,
+    authToken: body.authToken || process.env.AUTH_TOKEN || process.env.NUSUK_AUTH_TOKEN,
+    skipAuth: body.skipAuth === true,
+    activeEntityId: body.activeEntityId || process.env.ACTIVE_ENTITY_ID,
+    activeEntityTypeId: body.activeEntityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID,
+    captchaType: body.captchaType || process.env.CAPTCHA_TYPE || "visa",
+    captchaToken: body.captchaToken || process.env.CAPTCHA_TOKEN,
+    skipCaptcha: body.skipCaptcha === true,
+  });
+  const count = Math.max(1, Math.min(20, Number(body.count) || 1));
+  const warmed = await pool.warm(count);
+  return { ok: true, warmed };
+}
+
+async function handlePoolStatus() {
+  const pool = getNusukPool({});
+  return {
+    available: pool.available.length,
+    inUse: pool.inUse.size,
+    minInstances: pool.minInstances,
+    maxInstances: pool.maxInstances,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1123,8 @@ const ROUTES = {
   "/": handleHelp,
   "/help": handleHelp,
   "/health": async () => ({ ok: true }),
+  "/warm": handleWarm,
+  "/pool-status": handlePoolStatus,
   "/pull": handlePull,
   "/info": handleInfo,
   "/send": handleSend,

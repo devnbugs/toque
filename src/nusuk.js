@@ -48,9 +48,7 @@ export class Nusuk {
     }
 
     if (!token) {
-      throw new Error(
-        `auth file missing response.data.authInfo.userToken; provide a valid auth file at ${path} or set AUTH_TOKEN / NUSUK_AUTH_TOKEN`
-      );
+      return this;
     }
 
     const authInfo = parsed?.response?.data?.authInfo;
@@ -123,9 +121,7 @@ export class Nusuk {
     }
 
     if (!token) {
-      throw new Error(
-        `captcha file missing captchaToken; provide a valid captcha file at ${path} or set CAPTCHA_TOKEN`
-      );
+      return this;
     }
 
     this.captchaToken = token;
@@ -181,6 +177,26 @@ export class Nusuk {
         timeout: 60000,
       });
     }
+  }
+
+  /**
+   * Pre-warm the connection: navigate to the origin and make a tiny fetch so
+   * TLS, TCP, and HTTP keep-alive are established before the real request.
+   * Call this once after init() to make subsequent requests much faster.
+   */
+  async warm() {
+    if (!this.page) throw new Error("Nusuk not initialized");
+    await this._ensureOrigin();
+    // Fire a tiny no-op fetch to warm the HTTP connection. The browser will
+    // reuse the keep-alive connection for the next real request.
+    await this.page.evaluate(async () => {
+      try {
+        await fetch("/", { method: "HEAD", cache: "no-store" });
+      } catch {
+        // ignore
+      }
+    });
+    return this;
   }
 
   async buildRequestHeaders(headers = {}) {
