@@ -657,6 +657,64 @@ tr:hover td { background: var(--surface); }
   th, td { padding: 8px 10px; font-size: 12px; }
 }
 
+/* ─── API Docs ─────────────────────────────────────────────────────── */
+.api-docs-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.api-docs-item {
+  padding: var(--sp-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--t-fast);
+}
+
+.api-docs-item:hover {
+  border-color: var(--accent);
+}
+
+.api-docs-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+
+.api-docs-path {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.api-docs-desc {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.command-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.command-pill {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+}
+
 /* ─── Scrollbar ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -59,10 +59,9 @@
   "containers": [
     {
       "class_name": "ToqueContainer",
-      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:0e863d1",
+      "image": "registry.cloudflare.com/3943d4ec18c5391fbbe9158a5d629b55/toque:e374d33",
       "instance_type": "standard-4",
       "max_instances": 3,
-      "min_instances": 1,
       "constraints": {
         "regions": [
           "WNAM"

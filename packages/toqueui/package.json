@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
-    "deploy": "npx wrangler pages deploy .next --project-name toqueui"
+    "deploy": "npx wrangler pages deploy out --project-name toqueui"
   },
   "dependencies": {
     "next": "^15.1.0",

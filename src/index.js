@@ -19,9 +19,6 @@ export { ContainerProxy };
 
 export class ToqueContainer extends Container {
   defaultPort = 8080;
-  // Keep one instance warm for low-latency requests. Workflows handle durable
-  // scheduling, so we don't need the container to stay awake indefinitely.
-  minInstances = 1;
   // Ensure the container has outbound internet access (enabled by default,
   // but made explicit here for clarity — the Nusuk API needs it).
   enableInternet = true;

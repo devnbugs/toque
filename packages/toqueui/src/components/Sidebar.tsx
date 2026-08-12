@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/audit", label: "Audit Logs", icon: "≡" },
   { href: "/settings", label: "Settings", icon: "⚙" },
   { href: "/users", label: "Team", icon: "👥" },
+  { href: "/api-docs", label: "API Docs", icon: "📚" },
 ];
 
 export function Sidebar() {
