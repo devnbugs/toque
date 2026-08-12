@@ -17,19 +17,33 @@ import { parseJwt } from "./jwt.js";
 const DEFAULT_ENDPOINT = "https://autha-worker.decloud.workers.dev";
 const CAPTCHA_TYPES = new Set(["visa", "login", "general"]);
 
+/**
+ * Detect whether we're running inside a Cloudflare Container with outbound
+ * handlers available. In that environment, prefer the internal virtual host
+ * names (http://autha-w/*) over public URLs — they route through the parent
+ * Worker's service binding with no public internet round-trip and no API
+ * token needed.
+ */
+function getDefaultEndpoint() {
+  // Cloudflare Containers set CLOUDFLARE_CONTAINER=1 in the environment.
+  if (process.env.CLOUDFLARE_CONTAINER) {
+    return "http://autha-w";
+  }
+  return process.env.WORKER_URL || DEFAULT_ENDPOINT;
+}
+
 export class AuthaWorker {
   constructor(config = {}) {
     // When AUTHA_PROXY_URL is set (by the toque Worker's container envVars),
-    // route requests through the Worker's /autha/* service-binding proxy
-    // instead of calling the autha-worker directly over the public internet.
-    // The proxy injects the API token via the service binding, so the
-    // apiToken is not needed in proxy mode.
+    // route requests through the Worker's outbound handler for the
+    // autha-worker service binding instead of calling the autha-worker
+    // directly over the public internet. The outbound handler injects the
+    // API token via the service binding, so the apiToken is not needed.
     const proxyUrl = config.proxyUrl || process.env.AUTHA_PROXY_URL || "";
     this.proxyMode = Boolean(proxyUrl);
     this.endpoint = (
       config.endpoint ||
-      (this.proxyMode ? proxyUrl : process.env.WORKER_URL) ||
-      DEFAULT_ENDPOINT
+      (this.proxyMode ? proxyUrl : getDefaultEndpoint())
     ).replace(/\/+$/, "");
     this.entityId =
       config.entityId || process.env.ACTIVE_ENTITY_ID || this._readEntityFile()?.activeEntityId || null;

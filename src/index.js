@@ -19,12 +19,31 @@ export { ContainerProxy };
 
 export class ToqueContainer extends Container {
   defaultPort = 8080;
-  // Keep the container always active (no scale-to-zero) so SSH sessions,
-  // scheduled tasks, and requests have no cold-start delay.
-  sleepAfter = "99999h";
+  // Keep one instance warm for low-latency requests. Workflows handle durable
+  // scheduling, so we don't need the container to stay awake indefinitely.
+  minInstances = 1;
   // Ensure the container has outbound internet access (enabled by default,
   // but made explicit here for clarity — the Nusuk API needs it).
   enableInternet = true;
+  // Restrict outbound traffic to the Nusuk API origin and internal Worker
+  // virtual hosts. This reduces attack surface and prevents accidental
+  // egress to unrelated hosts.
+  outbound = {
+    allow: [
+      "masar.nusuk.sa",
+      "*.nusuk.sa",
+      "autha-worker.internal",
+      "app-worker.internal",
+      "mcp-server.internal",
+      "toque-worker.internal",
+      "autha-db",
+      "app-db",
+      "autha-w",
+      "app-w",
+      "mcp-w",
+      "toque-w",
+    ],
+  };
 
   // Pass Worker vars to the container as environment variables.
   // ACTIVE_ENTITY_ID and SYSTEM_USER_ID are NOT hardcoded here — they are
@@ -32,14 +51,15 @@ export class ToqueContainer extends Container {
   // saves them to entity.json inside the container's filesystem.
   //
   // AUTHA_PROXY_URL: when set, the container's AuthaWorker client routes
-  // auth/captcha pulls through this Worker's /autha/* service-binding proxy
-  // instead of calling the autha-worker over the public internet. The Worker
-  // injects WORKER_API_TOKEN via the binding, so the container doesn't need
-  // to send it. Falls back to WORKER_URL (direct) when unset.
+  // auth/captcha pulls through the Worker's outbound handler for the
+  // autha-worker service binding (http://autha-w/*) instead of calling
+  // the autha-worker over the public internet. The outbound handler injects
+  // the WORKER_API_TOKEN via the service binding, so the container doesn't
+  // need it. Falls back to WORKER_URL (direct public URL) when unset.
   envVars = {
     WORKER_URL: env.WORKER_URL,
     WORKER_API_TOKEN: env.WORKER_API_TOKEN,
-    AUTHA_PROXY_URL: env.AUTHA_PROXY_URL || (env.TOQUE_WORKER_URL ? `${env.TOQUE_WORKER_URL}/autha` : ""),
+    AUTHA_PROXY_URL: env.AUTHA_PROXY_URL || "http://autha-w",
     CAPMONSTER_API_KEY: env.CAPMONSTER_API_KEY,
     CAPSOLVER_API_KEY: env.CAPSOLVER_API_KEY,
   };
