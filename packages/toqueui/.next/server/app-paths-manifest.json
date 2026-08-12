@@ -1,8 +1,9 @@
 {
   "/_not-found/page": "app/_not-found/page.js",
+  "/api-docs/page": "app/api-docs/page.js",
   "/audit/page": "app/audit/page.js",
-  "/users/page": "app/users/page.js",
-  "/settings/page": "app/settings/page.js",
   "/entities/page": "app/entities/page.js",
-  "/page": "app/page.js"
+  "/page": "app/page.js",
+  "/settings/page": "app/settings/page.js",
+  "/users/page": "app/users/page.js"
 }
