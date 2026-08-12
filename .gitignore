@@ -14,3 +14,9 @@ nusuk-captcha.log
 .wrangler/
 .last-image
 *.log
+
+# Next.js build outputs (generated during deploy)
+packages/toqueui/.next/
+packages/toqueui/out/
+packages/toque-ui/.next/
+packages/toque-ui/out/
