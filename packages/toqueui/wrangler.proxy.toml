@@ -1,0 +1,10 @@
+name = "toqueui-proxy"
+main = "src/workers/nusuk-proxy.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+TARGET_BASE_URL = "https://toque.vortex.name.ng"
+
+# Deploy: wrangler deploy --config wrangler.proxy.toml
+# Then set your proxy URL in the app as: https://toqueui-proxy.<your-subdomain>.workers.dev

@@ -1545,11 +1545,6 @@ async function cmdSchedule(args) {
   const countIdx = args.indexOf("--count");
   const count = parsePositiveCount(countIdx !== -1 ? args[countIdx + 1] : undefined);
   let { payload, captchaType, useCaptcha } = parsePayloadOptions(args, { defaultCaptchaType: "visa" });
-  if (useCaptcha) {
-    const token = readCaptchaToken(captchaType);
-    if (!token) console.error("Warning: captcha.json not found or empty");
-    payload = injectCaptchaToken(payload, token);
-  }
 
   if (!targetStr) {
     console.error("Usage: nusuk schedule --target HH:MM:SS [--path /api/endpoint] [--count 5] [--captcha] [--captcha-type <type>]");
@@ -1565,17 +1560,16 @@ async function cmdSchedule(args) {
   }
 
   let authPath = findAuth();
-  if (!authPath || (useCaptcha && !payload?.captchaToken)) {
-    const pulled = await autoPull(captchaType);
-    authPath = authPath || (pulled.token ? pulled.authPath : null);
-    if (useCaptcha && !payload?.captchaToken && pulled.captcha) {
-      payload = injectCaptchaToken(payload, pulled.captcha);
-    }
-  }
   if (!authPath) {
     console.error("No auth token found. Run `nusuk pull` first or check auth.json");
     process.exitCode = 1;
     return;
+  }
+
+  if (useCaptcha) {
+    const token = readCaptchaToken(captchaType);
+    if (!token) console.error("Warning: captcha.json not found or empty");
+    payload = injectCaptchaToken(payload, token);
   }
   const nusuk = new Nusuk().loadAuth(authPath).loadEntity();
   await nusuk.init();

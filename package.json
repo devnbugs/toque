@@ -47,6 +47,8 @@
     "workerd@1.20260801.1": true
   },
   "overrides": {
-    "undici": "^7.29.0"
+    "undici": "^7.29.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   }
 }

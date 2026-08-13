@@ -19,12 +19,28 @@ export { ContainerProxy };
 
 export class ToqueContainer extends Container {
   defaultPort = 8080;
-  // Keep the container always active (no scale-to-zero) so SSH sessions,
-  // scheduled tasks, and requests have no cold-start delay.
-  sleepAfter = "99999h";
   // Ensure the container has outbound internet access (enabled by default,
   // but made explicit here for clarity — the Nusuk API needs it).
   enableInternet = true;
+  // Restrict outbound traffic to the Nusuk API origin and internal Worker
+  // virtual hosts. This reduces attack surface and prevents accidental
+  // egress to unrelated hosts.
+  outbound = {
+    allow: [
+      "masar.nusuk.sa",
+      "*.nusuk.sa",
+      "autha-worker.internal",
+      "app-worker.internal",
+      "mcp-server.internal",
+      "toque-worker.internal",
+      "autha-db",
+      "app-db",
+      "autha-w",
+      "app-w",
+      "mcp-w",
+      "toque-w",
+    ],
+  };
 
   // Pass Worker vars to the container as environment variables.
   // ACTIVE_ENTITY_ID and SYSTEM_USER_ID are NOT hardcoded here — they are
@@ -32,25 +48,17 @@ export class ToqueContainer extends Container {
   // saves them to entity.json inside the container's filesystem.
   //
   // AUTHA_PROXY_URL: when set, the container's AuthaWorker client routes
-  // auth/captcha pulls through this Worker's /autha/* service-binding proxy
-  // instead of calling the autha-worker over the public internet. The Worker
-  // injects WORKER_API_TOKEN via the binding, so the container doesn't need
-  // to send it. Falls back to WORKER_URL (direct) when unset.
-  //
-  // R2_* vars: when R2_BUCKET_NAME is set, the container's startup script
-  // mounts the R2 bucket at /mnt/r2 via tigrisfs (FUSE). This lets the
-  // container read/write R2 objects as local files without S3 API calls.
+  // auth/captcha pulls through the Worker's outbound handler for the
+  // autha-worker service binding (http://autha-w/*) instead of calling
+  // the autha-worker over the public internet. The outbound handler injects
+  // the WORKER_API_TOKEN via the service binding, so the container doesn't
+  // need it. Falls back to WORKER_URL (direct public URL) when unset.
   envVars = {
     WORKER_URL: env.WORKER_URL,
     WORKER_API_TOKEN: env.WORKER_API_TOKEN,
-    AUTHA_PROXY_URL: env.AUTHA_PROXY_URL || (env.TOQUE_WORKER_URL ? `${env.TOQUE_WORKER_URL}/autha` : ""),
+    AUTHA_PROXY_URL: env.AUTHA_PROXY_URL || "http://autha-w",
     CAPMONSTER_API_KEY: env.CAPMONSTER_API_KEY,
     CAPSOLVER_API_KEY: env.CAPSOLVER_API_KEY,
-    // R2 FUSE mount (tigrisfs) — all optional; mount is skipped if unset
-    R2_BUCKET_NAME: env.R2_BUCKET_NAME,
-    R2_ACCOUNT_ID: env.R2_ACCOUNT_ID,
-    R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
-    R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
   };
 
   onStart() {
@@ -619,7 +627,7 @@ export default {
       return jsonResponse(200, {
         ok: true,
         service: "toque-worker",
-        baseUrl: "https://toque.decloud.workers.dev",
+        baseUrl: url.origin,
         endpoints: API_DOCS,
       });
     }

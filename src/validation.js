@@ -19,7 +19,7 @@ export function parseTargetTime(value, now = new Date()) {
 
   const sameDayTarget = new Date(candidate);
   if (sameDayTarget.getTime() < now.getTime()) {
-    return null;
+    sameDayTarget.setDate(sameDayTarget.getDate() + 1);
   }
 
   return sameDayTarget;
