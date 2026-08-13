@@ -1,21 +1,49 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Toque UI — Cloudflare Pages Config
+# Auto-deploy on push: see .github/workflows/cloudflare-deploy.yml (uses npx wrangler)
+# Manual deploy:  pnpm run deploy:cf        (needs CLOUDFLARE_API_TOKEN env var)
+#                 pnpm run deploy:cf:preview (staging branch)
+# CI deploys use `npx wrangler` — do NOT call bare `wrangler` in the deploy
+# command or Cloudflare's git integration will fail with "wrangler: not found".
+# ═══════════════════════════════════════════════════════════════════════════════
+
 name = "toqueui"
-compatibility_date = "2026-08-08"
+compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-# Cloudflare Pages configuration for the Next.js dashboard
-# Deployed as a Pages project with static assets + edge functions
+# ── Pages project output directory ───────────────────────────────────────────
+# NOTE: Do NOT add [assets] directory = ".next" — it includes the webpack cache
+# which exceeds Cloudflare's 25 MiB per-file limit. Use pages_build_output_dir
+# for Cloudflare Pages deployments only. Also avoid a [build] block, which makes
+# Cloudflare run `wrangler deploy` (Workers) instead of `wrangler pages deploy`.
+pages_build_output_dir = ".next"
 
-# Environment variables (set via `wrangler pages secret put` or dashboard):
-#   TOQUE_WORKER_URL — the toque Worker URL (https://toque.decloud.workers.dev)
-#   NEXT_PUBLIC_TOQUE_WORKER_URL — same, exposed to client-side
-
-[build]
-command = "npm run build"
-cwd = "packages/toqueui"
-
-[site]
-bucket = ".next"
-entry-point = "."
-
+# ── Public environment variables (safe to commit) ────────────────────────────
 [vars]
-NEXT_PUBLIC_TOQUE_WORKER_URL = "https://toque.decloud.workers.dev"
+NEXT_PUBLIC_SITE_URL = "https://toqueui8784.builtwithrocket.new"
+NODE_ENV             = "production"
+
+# ── Secret environment variables ─────────────────────────────────────────────
+# NEVER commit real values here. Set each secret with:
+#   wrangler pages secret put <VAR_NAME> --project-name toqueui
+#
+# Required secrets for production:
+#   NEXT_PUBLIC_SUPABASE_URL           — Supabase project URL
+#   NEXT_PUBLIC_SUPABASE_ANON_KEY      — Supabase anon/public key
+#   OPENAI_API_KEY                     — OpenAI API key
+#   GEMINI_API_KEY                     — Google Gemini API key
+#   ANTHROPIC_API_KEY                  — Anthropic Claude API key
+#   PERPLEXITY_API_KEY                 — Perplexity API key
+#   NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY — Stripe publishable key
+#   NEXT_PUBLIC_GA_MEASUREMENT_ID      — Google Analytics measurement ID
+#   NEXT_PUBLIC_ADSENSE_ID             — Google AdSense publisher ID
+
+# ── KV Namespace (optional — uncomment to enable edge session / rate-limit cache)
+# [[kv_namespaces]]
+# binding = "TOQUE_CACHE"
+# id      = "YOUR_KV_NAMESPACE_ID_HERE"
+
+# ── Edge Proxy Worker ─────────────────────────────────────────────────────────
+# The Nusuk API proxy is a separate Worker — deploy with:
+#   wrangler deploy --config wrangler.proxy.toml
+# See wrangler.proxy.toml for its config.

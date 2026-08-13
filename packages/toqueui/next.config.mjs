@@ -1,18 +1,45 @@
+import { imageHosts } from './image-hosts.config.mjs';
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Static export for Cloudflare Pages deployment
-  output: "export",
-  images: { unoptimized: true },
-  // Dev-only rewrites (proxy API calls to the toque Worker to avoid CORS)
-  async rewrites() {
-    const workerUrl = process.env.TOQUE_WORKER_URL || "https://toque.decloud.workers.dev";
-    return [
-      { source: "/api/proxy/:path*", destination: `${workerUrl}/:path*` },
-      { source: "/api/proxy-autha/:path*", destination: `${workerUrl}/autha/:path*` },
-      { source: "/api/proxy-app/:path*", destination: `${workerUrl}/app/:path*` },
-      { source: "/api/proxy-mcp/:path*", destination: `${workerUrl}/mcp/:path*` },
-    ];
+  productionBrowserSourceMaps: true,
+  distDir: process.env.DIST_DIR || '.next',
+  typescript: {
+    ignoreBuildErrors: true,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  images: {
+    remotePatterns: imageHosts,
+    minimumCacheTTL: 60,
+    qualities: [75, 85, 100],
+  },
+  webpack(
+    config,
+    {
+      dev: dev
+    }
+  ) {
+    if (dev) {
+      config.module.rules.push({
+        test: /\.(jsx|tsx)$/,
+        exclude: [/node_modules/],
+        use: [{
+          loader: '@dhiwise/component-tagger/nextLoader',
+        }],
+      });
+      const ignoredPaths = (process.env.WATCH_IGNORED_PATHS || '')
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean);
+      config.watchOptions = {
+        ignored: ignoredPaths.length
+          ? ignoredPaths.map((p) => `**/${p.replace(/^\/+|\/+$/g, '')}/**`)
+          : undefined,
+      };
+    }
+    return config;
   },
 };
-
 export default nextConfig;
