@@ -73,11 +73,7 @@
       "authorized_keys": [
         {
           "name": "toque-admin",
-          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJz83jY18H/w0eg5powOZjK8PALdKpckiqOWGtGOsfAp toque-admin"
-        },
-        {
-          "name": "rhsalisu",
-          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJz83jY18H/w0eg5powOZjK8PALdKpckiqOWGtGOsfAp rhsalisu@DeCore"
+          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO1TcwaqrtmOxeXTK27aYYj1qh0oeFpKe6Ohp9YMx5aX rhsalisu@DeCore"
         }
       ]
     }
