@@ -581,7 +581,7 @@ async function cmdWhoami(args) {
   console.log(`│  name        ${p.name || p.nameAr || "unknown"}`);
   console.log(`│  userId      ${p.userId || p.userIdStr || "unknown"}`);
   console.log(`│  userType    ${p.userType ?? "unknown"}`);
-  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (accepted with entity header — run verify-login for full AUTH_TOKEN)" : ""}`);
+  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (not accepted by API — run: nusuk verify-login --otp <code>)" : ""}`);
   console.log(`│  entityId    ${entityId || "none"}`);
   console.log(`│  entityType  ${entityTypeId || "none"}`);
   if (p.entities?.length) {
