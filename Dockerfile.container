@@ -115,6 +115,15 @@ RUN npm ci --omit=dev && npm cache clean --force
 ENV CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 RUN npx cloakbrowser install || true
 
+# Install Python + optional CloakBrowser Python deps (aiohttp, websockets).
+# These are used by some CloakBrowser features (CDP over WebSocket, async proxy).
+# Python is optional — CloakBrowser works without it, but `cloakbrowser doctor`
+# reports them as "missing" if not installed.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip \
+  && pip3 install --no-cache-dir --break-system-packages aiohttp websockets \
+  && rm -rf /var/lib/apt/lists/* \
+  || echo "[build] Python deps install skipped (optional)"
+
 # Copy application code
 COPY . .
 

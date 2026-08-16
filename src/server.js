@@ -779,6 +779,8 @@ const CMD_CATALOG = {
   "captcha-start":  { args: ["--entity", "--type", "--interval", "--endpoint", "--output"], description: "Start in-process background CAPTCHA refresher" },
   "captcha-status": { args: [],                          description: "Show background refresher status" },
   "captcha-stop":   { args: [],                          description: "Stop the background refresher" },
+  token:            { args: ["--deploy", "--save", "--length", "--name"], description: "Generate a Cloudflare Worker API key (TOQUE_API_KEY)" },
+  doctor:           { args: ["--check", "--json"],         description: "Run CloakBrowser diagnostics and install missing deps" },
   help:             { args: [],                          description: "Show CLI help" },
 };
 

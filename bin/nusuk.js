@@ -2553,6 +2553,245 @@ async function cmdSync(args) {
   if (!healthOk) process.exitCode = 1;
 }
 
+/**
+ * cmdToken — generate a random API key for the Toque Worker (TOQUE_API_KEY)
+ * and optionally upload it as a Cloudflare Worker secret via `wrangler secret put`.
+ *
+ * Usage:
+ *   nusuk token                      Generate a 64-char hex key, print it
+ *   nusuk token --deploy             Generate + upload as TOQUE_API_KEY via wrangler
+ *   nusuk token --length 128         Generate a key with custom length (default 64)
+ *   nusuk token --name MY_SECRET     Use a custom secret name (default TOQUE_API_KEY)
+ *   nusuk token --save               Save to .env as WORKER_API_TOKEN
+ *
+ * The generated key is a cryptographically random hex string from crypto.randomBytes.
+ */
+async function cmdToken(args) {
+  const getFlag = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+
+  const length = parseInt(getFlag("--length") || "64", 10);
+  if (isNaN(length) || length < 16 || length > 512) {
+    throw new Error("--length must be an integer from 16 to 512");
+  }
+
+  const secretName = getFlag("--name") || "TOQUE_API_KEY";
+  const doDeploy = args.includes("--deploy");
+  const doSave = args.includes("--save");
+
+  // Generate cryptographically random hex key
+  const { randomBytes } = await import("crypto");
+  const token = randomBytes(Math.ceil(length / 2))
+    .toString("hex")
+    .slice(0, length);
+
+  console.log(`\n┌─ Generated API key`);
+  console.log(`│  name:   ${secretName}`);
+  console.log(`│  length: ${length} chars (hex)`);
+  console.log(`│  token:  ${token}`);
+  console.log(`└─`);
+
+  if (doSave) {
+    const envPath = resolve(process.cwd(), ".env");
+    let envContent = "";
+    if (existsSync(envPath)) {
+      envContent = readFileSync(envPath, "utf8");
+    }
+    const envKey = secretName === "TOQUE_API_KEY" ? "WORKER_API_TOKEN" : secretName;
+    const regex = new RegExp(`^${envKey}=.*$`, "m");
+    if (regex.test(envContent)) {
+      envContent = envContent.replace(regex, `${envKey}=${token}`);
+    } else {
+      envContent = envContent.trimEnd() + `\n${envKey}=${token}`;
+    }
+    writeFileSync(envPath, envContent.trimStart() + "\n", { mode: 0o600 });
+    console.log(`✓ saved to .env as ${envKey}`);
+  }
+
+  if (doDeploy) {
+    console.log(`\nDeploying ${secretName} to Cloudflare Worker via wrangler...`);
+    const result = spawnSync("npx", ["wrangler", "secret", "put", secretName], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      input: token + "\n",
+      shell: process.platform === "win32",
+    });
+
+    if (result.status === 0) {
+      console.log(`✓ ${secretName} uploaded to Cloudflare Worker`);
+    } else {
+      console.error(`✗ wrangler secret put failed (exit ${result.status})`);
+      if (result.stderr) console.error(result.stderr);
+      if (result.stdout) console.error(result.stdout);
+      process.exitCode = 1;
+    }
+  }
+
+  if (!doDeploy && !doSave) {
+    console.log(`\nTo use this key:`);
+    console.log(`  • Save locally:  nusuk token --save`);
+    console.log(`  • Deploy to CF:  nusuk token --deploy`);
+    console.log(`  • Both:          nusuk token --deploy --save`);
+  }
+}
+
+/**
+ * cmdDoctor — run CloakBrowser diagnostics and install missing dependencies.
+ *
+ * Runs `cloakbrowser doctor` to check the health of the CloakBrowser
+ * installation, then installs any missing Node.js peer dependencies
+ * (mmdb-lib, playwright-core, puppeteer-core) and optionally Python
+ * packages (aiohttp, websockets) if Python/pip are available.
+ *
+ * Usage:
+ *   nusuk doctor              Run diagnostics + install missing deps
+ *   nusuk doctor --check      Run diagnostics only (no installs)
+ *   nusuk doctor --json       Output raw JSON from cloakbrowser doctor
+ */
+async function cmdDoctor(args) {
+  const checkOnly = args.includes("--check") || args.includes("--dry-run");
+  const jsonMode = args.includes("--json");
+
+  // ── 1. Run cloakbrowser doctor ─────────────────────────────────────
+  console.log("Running cloakbrowser doctor...\n");
+  const doctorArgs = jsonMode ? ["doctor", "--json"] : ["doctor"];
+  const doctorResult = spawnSync("npx", ["cloakbrowser", ...doctorArgs], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: process.platform === "win32",
+  });
+
+  if (doctorResult.status !== 0) {
+    console.error("✗ cloakbrowser doctor failed");
+    if (doctorResult.stderr) console.error(doctorResult.stderr);
+    process.exitCode = 1;
+    return;
+  }
+
+  const stdout = doctorResult.stdout || "";
+  console.log(stdout);
+
+  // Parse JSON output to determine missing modules
+  let diag;
+  if (jsonMode) {
+    try {
+      diag = JSON.parse(stdout);
+    } catch {
+      // If JSON parse fails, try to extract from non-JSON output
+    }
+  } else {
+    // Parse the text output to find missing modules
+    diag = { modules: {} };
+    const moduleLines = stdout.match(/^\s+(.+?):\s+(ok|missing)$/gm);
+    if (moduleLines) {
+      for (const line of moduleLines) {
+        const m = line.match(/^\s+(.+?):\s+(ok|missing)$/);
+        if (m) diag.modules[m[1]] = m[2] === "ok";
+      }
+    }
+  }
+
+  if (!diag || !diag.modules) {
+    console.log("Could not parse module status. Run 'npx cloakbrowser doctor --json' for details.");
+    return;
+  }
+
+  // ── 2. Install missing Node.js peer deps ──────────────────────────
+  const missingNode = Object.entries(diag.modules)
+    .filter(([, ok]) => !ok)
+    .map(([name]) => name);
+
+  if (missingNode.length === 0) {
+    console.log("✓ All CloakBrowser Node.js modules are installed");
+  } else if (!checkOnly) {
+    console.log(`\nInstalling missing Node.js modules: ${missingNode.join(", ")}`);
+    const installResult = spawnSync("npm", ["install", ...missingNode], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: process.cwd(),
+      shell: process.platform === "win32",
+    });
+    if (installResult.status === 0) {
+      console.log(`✓ Installed: ${missingNode.join(", ")}`);
+    } else {
+      console.error(`✗ npm install failed (exit ${installResult.status})`);
+      if (installResult.stderr) console.error(installResult.stderr);
+      process.exitCode = 1;
+    }
+  } else {
+    console.log(`\nMissing modules (use --deploy to install): ${missingNode.join(", ")}`);
+  }
+
+  // ── 3. Check Python deps (aiohttp, websockets) ────────────────────
+  // These are optional Python packages used by some CloakBrowser features
+  // (e.g., CDP over WebSocket, async HTTP proxy). Only install if Python
+  // and pip are available on the system.
+  const pythonDeps = ["aiohttp", "websockets"];
+  const pythonAvailable = spawnSync("python3", ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const pipAvailable = spawnSync("pip3", ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  if (pythonAvailable.status === 0 && pipAvailable.status === 0) {
+    console.log("\nChecking Python dependencies...");
+    const missingPython = [];
+    for (const pkg of pythonDeps) {
+      const check = spawnSync("python3", ["-c", `import ${pkg}; print("${pkg} ok")`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (check.status !== 0) {
+        missingPython.push(pkg);
+        console.log(`  ${pkg}: missing`);
+      } else {
+        console.log(`  ${pkg}: ok`);
+      }
+    }
+
+    if (missingPython.length > 0 && !checkOnly) {
+      console.log(`\nInstalling missing Python packages: ${missingPython.join(", ")}`);
+      const pipInstall = spawnSync("pip3", ["install", ...missingPython], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (pipInstall.status === 0) {
+        console.log(`✓ Installed: ${missingPython.join(", ")}`);
+      } else {
+        console.error(`✗ pip3 install failed (exit ${pipInstall.status})`);
+        if (pipInstall.stderr) console.error(pipInstall.stderr);
+      }
+    }
+  } else {
+    // Python not available — these are optional, just note it
+    const missingPython = pythonDeps.filter((pkg) => {
+      const check = spawnSync("python3", ["-c", `import ${pkg}`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      return check.status !== 0;
+    });
+    if (missingPython.length > 0) {
+      console.log(`\nPython packages not checked (python3/pip3 not available): ${missingPython.join(", ")}`);
+    }
+  }
+
+  // ── 4. Summary ─────────────────────────────────────────────────────
+  console.log("\n┌─ Doctor Summary");
+  console.log(`│  Node.js modules: ${Object.entries(diag.modules).map(([k, v]) => `${k}: ${v ? "ok" : "missing"}`).join(", ")}`);
+  if (diag.binary) {
+    console.log(`│  Binary: ${diag.binary.installed ? "installed" : "missing"} (${diag.binary.version || "unknown"})`);
+    console.log(`│  Launch: ${diag.launch?.ok ? "✓ runs" : "✗ failed"}`);
+  }
+  console.log(`│  GeoIP DB: ${diag.geoip?.db_present ? "present" : "not downloaded (optional)"}`);
+  console.log(`└─`);
+}
+
 function help(topic = "") {
   if (topic === "captcha") {
     console.log(`
@@ -2607,6 +2846,8 @@ Common tasks:
   workflow              Manage Cloudflare Workflow instances (status, terminate)
   config                Memorized & configurable options (get, set, list, sync)
   sync                  Sync autha-worker credentials (endpoint, API token, signing secret)
+  token                 Generate a Cloudflare Worker API key (TOQUE_API_KEY)
+  doctor                Run CloakBrowser diagnostics and install missing deps
   sync-time             Sync system clock to accurate network time
   bench [count]         Measure request latency
 
@@ -2623,6 +2864,8 @@ Examples:
   nusuk verify-login --transaction-id <id> --otp 1234
   nusuk config set autha.apiToken <token>
   nusuk sync --api-token <token> --signing-secret <secret>
+  nusuk token --deploy --save
+  nusuk doctor
   nusuk refresh-token
   nusuk info
   nusuk send 12345
@@ -2771,6 +3014,12 @@ async function main() {
       break;
     case "sync":
       await cmdSync(args);
+      break;
+    case "token":
+      await cmdToken(args);
+      break;
+    case "doctor":
+      await cmdDoctor(args);
       break;
     case "help":
       help(args[0] || "");
