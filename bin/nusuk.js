@@ -1868,6 +1868,42 @@ async function refreshVisaCaptcha(entityId, endpoint) {
   return captcha;
 }
 
+/**
+ * Solve a captcha via CapSolver (default) or CapMonster (if
+ * CAPTCHA_PROVIDER=capmonster). Used as a fallback when no worker
+ * captcha or captcha.json token is available.
+ */
+async function solveCaptchaForVisa(captchaType = "visa") {
+  const provider = process.env.CAPTCHA_PROVIDER || "capsolver";
+  const siteKey = process.env.CAPTCHA_SITE_KEY || process.env.CAPMONSTER_SITE_KEY || "6Le-3OwpAAAAAARztuPscqBNbpEY3okMkd7dCoyx";
+  const pageUrl = process.env.CAPTCHA_PAGE_URL || "https://masar.nusuk.sa/umrah/mutamer-group/group-list";
+  const normalizedType = normalizeCaptchaType(captchaType);
+
+  if (provider === "capmonster") {
+    if (!process.env.CAPMONSTER_API_KEY) throw new Error("CAPMONSTER_API_KEY is required for captcha solving");
+    const solver = new CapMonsterSolver({
+      clientKey: process.env.CAPMONSTER_API_KEY,
+      siteKey,
+      pageUrl,
+      pageAction: process.env.CAPMONSTER_PAGE_ACTION,
+    });
+    console.log(`  solving captcha via CapMonster Cloud...`);
+    const token = await solver.solve({ version: 2, type: "recaptcha", timeout: 180000 });
+    return token;
+  }
+
+  if (!process.env.CAPSOLVER_API_KEY) throw new Error("CAPSOLVER_API_KEY is required for captcha solving");
+  const solver = new CapSolver({
+    clientKey: process.env.CAPSOLVER_API_KEY,
+    siteKey,
+    pageUrl,
+    pageAction: process.env.CAPSOLVER_PAGE_ACTION,
+  });
+  console.log(`  solving captcha via CapSolver...`);
+  const token = await solver.solve({ version: 2, type: "recaptcha" });
+  return token;
+}
+
 async function warmVisaConnection(nusuk, targetTime) {
   const warmupSamples = await calibrate(nusuk, 5, "Warm-up");
   return computeSendSchedule(targetTime, warmupSamples, {
@@ -2056,8 +2092,19 @@ async function cmdSendVisa(args) {
       captcha = readCaptchaToken(captchaType);
       if (captcha) {
         console.warn("  worker has no new captcha — reusing captcha.json");
-      } else {
-        console.error("  no captcha available (worker or captcha.json) — aborting");
+      }
+    }
+    if (!captcha) {
+      // Fall back to captcha solver (CapSolver default, or CapMonster if
+      // CAPTCHA_PROVIDER=capmonster). This ensures send-visa works even
+      // when the extension hasn't captured a captcha token.
+      console.log("  no worker/captcha.json captcha — solving via captcha solver...");
+      try {
+        captcha = await solveCaptchaForVisa(captchaType);
+        writeCaptchaToken(captcha, normalizeCaptchaType(captchaType));
+        console.log(`  captcha solved and saved to captcha.json`);
+      } catch (e) {
+        console.error(`  captcha solver failed: ${e.message}`);
         process.exitCode = 1;
         return;
       }

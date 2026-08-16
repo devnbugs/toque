@@ -59,21 +59,17 @@ export class Nusuk {
     // (login response has authInfo.entityId=null, but the AUTH_TOKEN JWT
     // carries defaultEntityId/defaultEntityTypeId/entities)
     const jwt = parseJwt(token);
-    // Validate token type — only AUTH_TOKEN (type 3) is accepted by the
-    // Nusuk API for authenticated endpoints.
-    // TEMP_TOKEN (2), USER_TOKEN (5), and REFRESH_TOKEN (4) all lack the
-    // entity claims needed and will cause 401 "not authorized" errors.
-    // The user must run `nusuk verify-login --otp <code>` to upgrade to
-    // an AUTH_TOKEN (type 3). The transaction ID is auto-extracted from
-    // the USER_TOKEN JWT.
-    if (jwt?.payload?.tokenType && jwt.payload.tokenType !== 3) {
-      const tokenTypeMap = { 2: "TEMP", 4: "REFRESH", 5: "USER" };
+    // Validate token type — only AUTH_TOKEN (type 3) and USER_TOKEN (type 5)
+    // are accepted. TEMP_TOKEN (2) and REFRESH_TOKEN (4) are rejected.
+    // USER_TOKEN (type 5) comes from `nusuk login`/`nusuk pull` (the
+    // extension-captured login response). It lacks entity claims in the
+    // JWT, so the entity ID must come from entity.json/.env. The Nusuk API
+    // accepts it when the activeentityid header is set.
+    if (jwt?.payload?.tokenType && jwt.payload.tokenType !== 3 && jwt.payload.tokenType !== 5) {
+      const tokenTypeMap = { 2: "TEMP", 4: "REFRESH" };
       const label = tokenTypeMap[jwt.payload.tokenType] || jwt.payload.tokenType;
-      const hint = jwt.payload.tokenType === 5
-        ? ` — run \`nusuk verify-login --otp <code>\` to upgrade to an AUTH_TOKEN (type 3). The transaction ID is auto-extracted from the JWT.`
-        : ` — run \`nusuk verify-login\` to get the full auth token with entity claims`;
       throw new Error(
-        `auth token is a ${label}_TOKEN (type ${jwt.payload.tokenType}), not an AUTH_TOKEN (type 3)${hint}`
+        `auth token is a ${label}_TOKEN (type ${jwt.payload.tokenType}), not an AUTH_TOKEN (type 3) — run \`nusuk verify-login\` to get the full auth token with entity claims`
       );
     }
     const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
