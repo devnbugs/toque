@@ -13,7 +13,14 @@ import { parseJwt } from "../src/jwt.js";
 import { CapSolver } from "../src/capsolver.js";
 import { CapMonsterSolver } from "../src/capmonster.js";
 import { parsePositiveCount, parseTargetTime } from "../src/validation.js";
-import { computeSendSchedule } from "../src/scheduling.js";
+import {
+  computeSendSchedule,
+  computeRefinedSchedule,
+  computeKeepaliveInterval,
+  computePrecisionWait,
+  mergeSamples,
+  computeClockOffset,
+} from "../src/scheduling.js";
 import { buildVisaPayload } from "../src/visa-payload.js";
 import { buildLoginRequest, DEFAULT_TRUSTED_DEVICE_TOKEN } from "../src/nusuk-crypto.js";
 import { summarizeRequestTiming } from "../src/timing.js";
@@ -1831,7 +1838,7 @@ async function cmdSchedule(args) {
     const sdTtfb = pool.length ? stddev(pool) : 0;
 
     // Weighted one-way: bias toward min but include avg for jitter
-    const netOneWay = minTtfb ? Math.round((minTtfb * 0.6 + avgRealTtfb * 0.4) / 2) : Math.round(Math.min(...totals) / 4);
+    let netOneWay = minTtfb ? Math.round((minTtfb * 0.6 + avgRealTtfb * 0.4) / 2) : Math.round(Math.min(...totals) / 4);
     const jitterBuffer = Math.min(sdTtfb + 20, 120);
     const sendAhead = netOneWay + jitterBuffer;
     const sendAt = new Date(target.getTime() - sendAhead);
@@ -1853,12 +1860,34 @@ async function cmdSchedule(args) {
     if (waitMs > 0) {
       console.log(`│\n│  ⏱ waiting ${ms(waitMs)}...`);
 
-      // Phase 3: mid-calibration refresh at 60% of wait time
-      if (waitMs > 5000) {
-        const midWait = Math.round(waitMs * 0.6);
-        await new Promise((r) => setTimeout(r, midWait));
-        const refresh = await calibrate(nusuk, 2, "Mid-calibration refresh");
+      // Phase 3: keepalive pings during the wait period
+      // Instead of a single mid-calibration at 60%, we send adaptive
+      // keepalive pings throughout the wait to maintain the TLS/TCP
+      // connection and collect ongoing latency samples.
+      if (waitMs > 3000) {
+        const calibrationRounds = await keepConnectionWarm(
+          nusuk,
+          [...warmup, ...samples],
+          sendAt,
+          [[...warmup], [...samples]],
+        );
 
+        // Refine schedule from keepalive samples
+        if (calibrationRounds.length > 2) {
+          const refined = computeRefinedSchedule(target, calibrationRounds, {
+            clientOverheadMs: 0, // already included in sendAhead above
+          });
+          const refinedSendAt = refined.sendAt.getTime();
+          // Only adjust if within 200ms of original and still in the future
+          if (Math.abs(refinedSendAt - sendAt.getTime()) < 200 && refinedSendAt > Date.now()) {
+            console.log(`│  ↳ refined 1-way: ${ms(refined.oneWayMs)} (from ${calibrationRounds.length} rounds)`);
+            sendAt.setTime(refinedSendAt);
+            netOneWay = refined.oneWayMs;
+          }
+        }
+      } else if (waitMs > 500) {
+        // Very short wait — single quick calibration
+        const refresh = await calibrate(nusuk, 2, "Quick refresh");
         const refreshTtfb = refresh.map((s) => s.ttfb).filter((v) => v > 2).filter(Boolean);
         if (refreshTtfb.length) {
           const refreshMin = Math.min(...refreshTtfb);
@@ -1869,14 +1898,20 @@ async function cmdSchedule(args) {
           if (adjustedSend.getTime() < sendAt.getTime() + 200 && adjustedSend.getTime() > Date.now()) {
             console.log(`│  ↳ refresh 1-way: ${ms(refreshOneWay)}  → adjusting send time`);
             sendAt.setTime(adjustedSend.getTime());
-          } else {
-            console.log(`│  ↳ refresh 1-way: ${ms(refreshOneWay)}  (keep original schedule)`);
+            netOneWay = refreshOneWay;
           }
         }
       }
 
+      // Precision wait: setTimeout for bulk, busy-wait for final 5ms
       const remaining = sendAt.getTime() - Date.now();
-      if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
+      if (remaining > 0) {
+        const actualTime = precisionWait(sendAt.getTime());
+        const waitDrift = actualTime - sendAt.getTime();
+        if (Math.abs(waitDrift) > 1) {
+          console.log(`│  precision wait drift: ${waitDrift >= 0 ? "+" : ""}${waitDrift}ms`);
+        }
+      }
 
       const sendActual = Date.now();
       const res = await nusuk.request(path, { method, payload });
@@ -1957,11 +1992,140 @@ async function solveCaptchaForVisa(captchaType = "visa") {
 }
 
 async function warmVisaConnection(nusuk, targetTime) {
-  const warmupSamples = await calibrate(nusuk, 5, "Warm-up");
-  return computeSendSchedule(targetTime, warmupSamples, {
+  // Multi-phase connection warming with keepalive pings.
+  //
+  // Phase 1: Initial warm-up (3 requests) — establishes TLS/TCP connection,
+  //   warms the browser's HTTP cache and connection pool, and collects
+  //   initial TTFB samples. These first samples are often slower due to
+  //   cold-start (TLS handshake, DNS resolution) so they're used only
+  //   to establish the connection, not for timing estimates.
+  //
+  // Phase 2: Calibration (5 requests) — now that the connection is warm,
+  //   collect TTFB samples that represent steady-state latency. These
+  //   are used for the initial send schedule.
+  //
+  // The schedule is refined later via keepalive pings (see keepConnectionWarm).
+  const warmupSamples = await calibrate(nusuk, 3, "Warm-up (TLS/TCP establish)");
+  const calibSamples = await calibrate(nusuk, 5, "Calibration (steady-state)");
+
+  // Collect server clock offset from the Date header of the last warm-up response
+  let serverClockOffsetMs = 0;
+  try {
+    const probeRes = await nusuk.request("/manifest.json");
+    const dateHeader = probeRes.headers?.date || probeRes.headers?.Date;
+    if (dateHeader) {
+      const oneWayEstimate = computeSendSchedule(targetTime, calibSamples).oneWayMs;
+      serverClockOffsetMs = computeClockOffset(new Date(), dateHeader, oneWayEstimate);
+      console.log(`  server clock offset: ${serverClockOffsetMs >= 0 ? "+" : ""}${serverClockOffsetMs}ms`);
+    }
+  } catch {
+    // Clock offset is a nice-to-have, not critical
+  }
+
+  return computeSendSchedule(targetTime, calibSamples, {
     jitterBufferMs: 40,
     clientOverheadMs: 80,
+    serverClockOffsetMs,
   });
+}
+
+/**
+ * Keep the TLS/TCP connection warm during the wait period by sending
+ * periodic lightweight pings to /manifest.json. This prevents the browser's
+ * connection pool from closing the idle socket, which would force a new
+ * TLS handshake on the actual request (adding 100-300ms of latency).
+ *
+ * The ping interval is adaptive: if the connection is stable (low jitter),
+ * pings are spaced out; if jittery, pings are more frequent to keep the
+ * connection alive and detect changes in latency.
+ *
+ * @param {Nusuk} nusuk - The Nusuk instance with an active browser page.
+ * @param {Array} samples - Calibration samples for interval computation.
+ * @param {Date} sendAt - When the actual request will be sent.
+ * @param {Array} rounds - Accumulated calibration rounds (for refinement).
+ * @returns {Array} Updated rounds including keepalive samples.
+ */
+async function keepConnectionWarm(nusuk, samples, sendAt, rounds = []) {
+  const interval = computeKeepaliveInterval(samples);
+  const now = Date.now();
+  const msUntilSend = sendAt.getTime() - now;
+
+  // Don't ping if we're within 2 seconds of send time (let the connection
+  // settle and avoid interfering with the final request)
+  if (msUntilSend < 2000) return rounds;
+
+  // Calculate how many pings we can fit before send time
+  const pingCount = Math.floor(msUntilSend / interval);
+  if (pingCount === 0) return rounds;
+
+  console.log(`  keepalive: ${pingCount} pings every ${ms(interval)} (connection warm-up)`);
+
+  for (let i = 0; i < pingCount; i++) {
+    const nextPingAt = now + (i + 1) * interval;
+    const waitMs = nextPingAt - Date.now();
+    if (waitMs <= 0) continue;
+
+    // Stop if we're within 2 seconds of send time
+    if (sendAt.getTime() - Date.now() < 2000) break;
+
+    await new Promise((r) => setTimeout(r, waitMs));
+
+    // Send a keepalive ping and collect the sample
+    try {
+      const res = await nusuk.request("/manifest.json");
+      if (res.timing) {
+        rounds.push([res.timing]);
+        console.log(`    keepalive ${i + 1}/${pingCount}: ttfb=${ms(res.timing.ttfb ?? "?")} total=${ms(res.timing.total)}`);
+      }
+    } catch {
+      // Keepalive failure is non-fatal — the connection will be re-established
+    }
+  }
+
+  return rounds;
+}
+
+/**
+ * Precision wait: setTimeout for the bulk of the wait, then busy-wait
+ * for the final few milliseconds for sub-ms timing accuracy.
+ *
+ * setTimeout has ~1-4ms granularity on most platforms (Node.js event loop,
+ * OS scheduler). For the final 5ms, we spin on Date.now() to hit the
+ * exact target time with <1ms error.
+ *
+ * @param {number} targetMs - The target timestamp (Date.now() value).
+ * @returns {number} The actual time when the wait ended (for drift measurement).
+ */
+function precisionWait(targetMs) {
+  const remaining = targetMs - Date.now();
+  const { setTimeoutMs, busyWaitMs } = computePrecisionWait(remaining);
+
+  // Phase 1: setTimeout for the bulk of the wait
+  if (setTimeoutMs > 0) {
+    // Use Atomics.wait if available (more precise than setTimeout for large waits)
+    // but fall back to setTimeout (Atomics.wait blocks the thread, so only use
+    // for short waits in the final phase)
+    const start = Date.now();
+    while (Date.now() - start < setTimeoutMs) {
+      // Use a coarse sleep — we'll busy-wait the last few ms anyway
+      const sleepMs = Math.min(setTimeoutMs - (Date.now() - start), 100);
+      if (sleepMs > 0) {
+        // Synchronous sleep via Atomics.wait (non-blocking to event loop
+        // because we're in a CLI, not a server)
+        const buf = new Int32Array(new SharedArrayBuffer(4));
+        Atomics.wait(buf, 0, 0, sleepMs);
+      }
+    }
+  }
+
+  // Phase 2: Busy-wait for the final few milliseconds
+  if (busyWaitMs > 0) {
+    while (Date.now() < targetMs) {
+      // Spin — this is intentionally CPU-intensive for sub-ms precision
+    }
+  }
+
+  return Date.now();
 }
 
 async function cmdSendVisa(args) {
@@ -2165,20 +2329,68 @@ async function cmdSendVisa(args) {
     }
 
     let schedule = null;
+    let calibrationRounds = [];
     if (target) {
       schedule = await warmVisaConnection(nusuk, target);
       console.log(`\n┌─ Schedule`);
       console.log(`│  ⏱ target           ${formatTime(target)}`);
       console.log(`│  ⏱ estimated 1-way  ${ms(schedule.oneWayMs)}`);
+      console.log(`│  ⏱ jitter buffer     ${ms(schedule.jitterBufferMs)}`);
+      if (schedule.serverClockOffsetMs) {
+        console.log(`│  ⏱ clock offset     ${schedule.serverClockOffsetMs >= 0 ? "+" : ""}${schedule.serverClockOffsetMs}ms`);
+      }
       console.log(`│  ⏱ send at          ${formatTime(schedule.sendAt)} (${ms(schedule.sendAheadMs)} ahead)`);
       console.log(`└─`);
+
+      // Keep the connection warm during the wait period with adaptive
+      // keepalive pings. This prevents the TLS/TCP connection from going
+      // idle and being closed by the browser's connection pool, which
+      // would force a new handshake on the actual request (100-300ms penalty).
+      const waitMs = schedule.sendAt.getTime() - Date.now();
+      if (waitMs > 3000) {
+        console.log(`\n┌─ Connection Keepalive`);
+        calibrationRounds = await keepConnectionWarm(
+          nusuk,
+          [{ ttfb: schedule.oneWayMs * 2, total: schedule.oneWayMs * 2 }],
+          schedule.sendAt,
+          calibrationRounds,
+        );
+
+        // Refine the schedule using keepalive samples if we have enough
+        if (calibrationRounds.length > 0) {
+          const refined = computeRefinedSchedule(target, calibrationRounds, {
+            serverClockOffsetMs: schedule.serverClockOffsetMs,
+            clientOverheadMs: 80,
+          });
+          // Only adjust if the refined estimate is within 200ms of the original
+          const refinedSendAt = refined.sendAt.getTime();
+          const originalSendAt = schedule.sendAt.getTime();
+          if (Math.abs(refinedSendAt - originalSendAt) < 200 && refinedSendAt > Date.now()) {
+            console.log(`│  ↳ refined 1-way: ${ms(refined.oneWayMs)} (from ${calibrationRounds.length} rounds)`);
+            schedule = refined;
+          }
+        }
+        console.log(`└─`);
+      }
     }
 
     const actualSendAt = target ? schedule.sendAt.getTime() : sendAt;
+
+    // Precision wait: use setTimeout for the bulk, then busy-wait for
+    // the final 5ms for sub-millisecond timing accuracy.
     const secondWait = actualSendAt - Date.now();
     if (secondWait > 0) {
       console.log(`\n⏱ waiting ${ms(secondWait)} until execute (${formatTime(new Date(actualSendAt))})...`);
-      await new Promise((r) => setTimeout(r, secondWait));
+      if (target) {
+        // Use precision wait for scheduled sends
+        const actualTime = precisionWait(actualSendAt);
+        const waitDrift = actualTime - actualSendAt;
+        if (Math.abs(waitDrift) > 1) {
+          console.log(`  precision wait drift: ${waitDrift >= 0 ? "+" : ""}${waitDrift}ms`);
+        }
+      } else {
+        await new Promise((r) => setTimeout(r, secondWait));
+      }
     }
 
     const tokenValue = payload?.captchaToken || payload?.recaptchaToken || readCaptchaToken(captchaType) || captcha;
@@ -2214,6 +2426,13 @@ async function cmdSendVisa(args) {
     console.log(`│  ⬇ response received ${formatTime(timing.responseReceivedAt)}`);
     console.log(`│  ⏱ elapsed          ${ms(timing.elapsedMs)}`);
     console.log(`│  • response date    ${timing.serverDateHeader || "(none)"}`);
+    if (target && schedule) {
+      const serverArrival = sendActual + schedule.oneWayMs;
+      const drift = serverArrival - target.getTime();
+      console.log(`│  ⏱ ~server arrival  ${formatTime(new Date(serverArrival))}`);
+      console.log(`│  ⏱ target           ${formatTime(target)}`);
+      console.log(`│  ⏱ drift            ${drift >= 0 ? "+" : ""}${drift}ms`);
+    }
     console.log(`│  ${statusIcon} status            ${res.status}`);
     if (res.timing) console.log(`│  ⏱ timing           total=${ms(res.timing.total)}  ttfb=${ms(res.timing.ttfb ?? "?")}`);
     if (res.json) console.log(`│  • response         ${JSON.stringify(res.json, null, 2).slice(0, 600).split("\n").join("\n│  ")}`);

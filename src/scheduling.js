@@ -133,3 +133,165 @@ export function computeClockOffset(ourReceiveTime, serverDateHeader, oneWayLaten
   const elapsed = ourReceiveTime.getTime() - serverTime.getTime();
   return Math.round(elapsed - oneWayLatencyMs);
 }
+
+/**
+ * Merge new calibration samples with existing ones using exponential decay
+ * weighting. Recent samples have more influence than older ones, so the
+ * one-way estimate adapts to changing network conditions.
+ *
+ * @param {Array} existing - Previously collected samples.
+ * @param {Array} fresh - New samples from the latest calibration round.
+ * @param {number} [maxSamples=20] - Maximum samples to retain.
+ * @returns {Array} Merged sample list (most recent last).
+ */
+export function mergeSamples(existing = [], fresh = [], maxSamples = 20) {
+  const merged = [...existing, ...fresh];
+  if (merged.length <= maxSamples) return merged;
+  // Keep the most recent maxSamples, dropping oldest first
+  return merged.slice(merged.length - maxSamples);
+}
+
+/**
+ * Compute a refined send schedule by merging calibration rounds.
+ *
+ * Each calibration round produces TTFB samples. This function merges all
+ * rounds, applies exponential decay weighting (recent rounds count more),
+ * and produces a final schedule. The weighting factor controls how quickly
+ * old samples decay: 0.8 means each older round has 80% weight of the next.
+ *
+ * @param {Date} targetTime - When the request should arrive.
+ * @param {Array<Array>} rounds - Array of calibration rounds (each is an array of samples).
+ * @param {object} [options] - Same as computeSendSchedule, plus:
+ * @param {number} [options.decayFactor=0.8] - Weight of each older round (0-1).
+ * @param {number} [options.serverClockOffsetMs=0] - Clock skew correction.
+ * @returns {object} Refined schedule.
+ */
+export function computeRefinedSchedule(targetTime, rounds = [], options = {}) {
+  const decayFactor = options.decayFactor ?? 0.8;
+  const serverClockOffsetMs = options.serverClockOffsetMs ?? 0;
+
+  // Flatten rounds with decay weighting: most recent round has weight 1.0,
+  // previous round 0.8, before that 0.64, etc.
+  const weightedSamples = [];
+  for (let r = rounds.length - 1; r >= 0; r--) {
+    const weight = Math.pow(decayFactor, rounds.length - 1 - r);
+    for (const sample of rounds[r]) {
+      weightedSamples.push({ ...sample, _weight: weight });
+    }
+  }
+
+  // Compute weighted one-way latency
+  const validTtfb = weightedSamples
+    .map((s) => ({ ttfb: Number(s?.ttfb), weight: s._weight }))
+    .filter((s) => Number.isFinite(s.ttfb) && s.ttfb > 2);
+
+  let oneWayMs;
+  let jitterBufferMs;
+  let method;
+
+  if (validTtfb.length >= 3) {
+    // Weighted trimmed mean: sort by TTFB, trim 20%, weight-average the rest
+    const sorted = [...validTtfb].sort((a, b) => a.ttfb - b.ttfb);
+    const trimCount = Math.floor(sorted.length * 0.2);
+    const trimmed = sorted.slice(trimCount, sorted.length - trimCount);
+    const totalWeight = trimmed.reduce((sum, s) => sum + s.weight, 0);
+    const weightedMean = trimmed.reduce((sum, s) => sum + s.ttfb * s.weight, 0) / totalWeight;
+    oneWayMs = Math.round(weightedMean / 2);
+
+    // Jitter from weighted variance
+    const mean = validTtfb.reduce((sum, s) => sum + s.ttfb * s.weight, 0) /
+      validTtfb.reduce((sum, s) => sum + s.weight, 0);
+    const wVar = validTtfb.reduce((sum, s) => sum + s.weight * (s.ttfb - mean) ** 2, 0) /
+      validTtfb.reduce((sum, s) => sum + s.weight, 0);
+    const wStd = Math.sqrt(wVar);
+    const zScore = (options.confidence ?? 0.95) >= 0.99 ? 2.576 : 1.96;
+    jitterBufferMs = Math.max(Math.round((zScore * wStd) / 2), 10);
+    method = "weighted-trimmed-mean";
+  } else if (validTtfb.length > 0) {
+    const minTtfb = Math.min(...validTtfb.map((s) => s.ttfb));
+    const wAvg = validTtfb.reduce((sum, s) => sum + s.ttfb * s.weight, 0) /
+      validTtfb.reduce((sum, s) => sum + s.weight, 0);
+    oneWayMs = Math.round((minTtfb * 0.6 + wAvg * 0.4) / 2);
+    jitterBufferMs = Math.max(Math.round(oneWayMs * 0.15), 10);
+    method = "weighted-min-avg";
+  } else {
+    oneWayMs = 150;
+    jitterBufferMs = 50;
+    method = "default-fallback";
+  }
+
+  const clientOverheadMs = options.clientOverheadMs ?? 80;
+  const sendAheadMs = Math.max(
+    oneWayMs + jitterBufferMs + clientOverheadMs + serverClockOffsetMs,
+    options.minSendAheadMs ?? 50,
+  );
+  const sendAt = new Date(targetTime.getTime() - sendAheadMs);
+
+  return {
+    targetTime,
+    oneWayMs,
+    jitterBufferMs,
+    clientOverheadMs,
+    serverClockOffsetMs,
+    sendAheadMs,
+    sendAt,
+    serverArrivalMs: targetTime.getTime(),
+    method,
+    sampleCount: validTtfb.length,
+    roundCount: rounds.length,
+  };
+}
+
+/**
+ * Compute the optimal keepalive interval to maintain a warm TLS/TCP connection
+ * without excessive traffic. Uses the minimum observed TTFB as a proxy for
+ * connection health: if the connection is warm, keepalive pings can be spaced
+ * out; if there's jitter, ping more frequently.
+ *
+ * @param {Array} samples - Calibration samples.
+ * @param {object} [options]
+ * @param {number} [options.minIntervalMs=2000] - Minimum ping interval.
+ * @param {number} [options.maxIntervalMs=10000] - Maximum ping interval.
+ * @returns {number} Keepalive interval in ms.
+ */
+export function computeKeepaliveInterval(samples = [], options = {}) {
+  const minInterval = options.minIntervalMs ?? 2000;
+  const maxInterval = options.maxIntervalMs ?? 10000;
+
+  const validTtfb = samples
+    .map((s) => Number(s?.ttfb))
+    .filter((v) => Number.isFinite(v) && v > 2);
+
+  if (validTtfb.length < 2) return maxInterval;
+
+  const mean = validTtfb.reduce((a, b) => a + b, 0) / validTtfb.length;
+  const variance = validTtfb.reduce((s, v) => s + (v - mean) ** 2, 0) / validTtfb.length;
+  const stdDev = Math.sqrt(variance);
+
+  // Low jitter → longer interval; high jitter → shorter interval
+  // Scale: stddev of 0 → maxInterval, stddev of 30+ → minInterval
+  const jitterRatio = Math.min(stdDev / 30, 1);
+  const interval = Math.round(maxInterval - (maxInterval - minInterval) * jitterRatio);
+  return Math.max(Math.min(interval, maxInterval), minInterval);
+}
+
+/**
+ * Determine the final-phase precision wait strategy.
+ *
+ * In the last few milliseconds before send, setTimeout alone has ~1-4ms
+ * granularity on most platforms. This function computes when to switch
+ * from setTimeout to a busy-wait loop for sub-millisecond precision.
+ *
+ * @param {number} remainingMs - Milliseconds until send time.
+ * @param {object} [options]
+ * @param {number} [options.busyWaitThresholdMs=5] - Switch to busy-wait below this.
+ * @returns {object} { setTimeoutMs, busyWaitMs } — how long to setTimeout, then busy-wait.
+ */
+export function computePrecisionWait(remainingMs, options = {}) {
+  const busyWaitThreshold = options.busyWaitThresholdMs ?? 5;
+  if (remainingMs <= 0) return { setTimeoutMs: 0, busyWaitMs: 0 };
+  if (remainingMs <= busyWaitThreshold) {
+    return { setTimeoutMs: 0, busyWaitMs: remainingMs };
+  }
+  return { setTimeoutMs: remainingMs - busyWaitThreshold, busyWaitMs: busyWaitThreshold };
+}
