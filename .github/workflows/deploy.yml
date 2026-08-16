@@ -1,7 +1,7 @@
 name: Build and Deploy Toque
 
 on:
-  push:
+  #push:
     branches: [main]
     paths:
       - "src/**"
