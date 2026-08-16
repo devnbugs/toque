@@ -386,12 +386,22 @@ async function handleEntityLatest(request, env, entityId) {
 
 async function handleLatestToken(request, env, entityId) {
   if (!env.AUTHA_DB) return errorResponse(500, "AUTHA_DB binding not configured");
-  const row = await env.AUTHA_DB
+  // Query AUTH_TOKEN records first — SYNC records may have newer timestamps
+  // but don't contain a token. Fall back to SYNC only if no AUTH_TOKEN exists.
+  let row = await env.AUTHA_DB
     .prepare(
-      "SELECT key, value, timestamp FROM records WHERE entity_id = ? AND (action LIKE '%AUTH_TOKEN%' OR action LIKE '%SYNC%') ORDER BY timestamp DESC LIMIT 1"
+      "SELECT key, value, timestamp FROM records WHERE entity_id = ? AND action LIKE '%AUTH_TOKEN%' ORDER BY timestamp DESC LIMIT 1"
     )
     .bind(entityId)
     .first();
+  if (!row) {
+    row = await env.AUTHA_DB
+      .prepare(
+        "SELECT key, value, timestamp FROM records WHERE entity_id = ? AND action LIKE '%SYNC%' ORDER BY timestamp DESC LIMIT 1"
+      )
+      .bind(entityId)
+      .first();
+  }
   if (!row) return errorResponse(404, "No auth token for entity");
   const parsed = safeParse(row.value);
   return jsonResponse({
@@ -427,13 +437,22 @@ async function handleEntityContext(request, env, entityId, url) {
   const systemUserId = url.searchParams.get("systemUserId") || "default";
   const uid = sanitizeSystemUserId(systemUserId);
 
-  // Latest auth token
-  const authRow = await env.AUTHA_DB
+  // Latest auth token — query AUTH_TOKEN records first (SYNC records may
+  // have newer timestamps but don't contain a token).
+  let authRow = await env.AUTHA_DB
     .prepare(
-      "SELECT key, value, timestamp FROM records WHERE entity_id = ? AND (action LIKE '%AUTH_TOKEN%' OR action LIKE '%SYNC%') AND (system_user_id = ? OR system_user_id = 'default') ORDER BY timestamp DESC LIMIT 1"
+      "SELECT key, value, timestamp FROM records WHERE entity_id = ? AND action LIKE '%AUTH_TOKEN%' AND (system_user_id = ? OR system_user_id = 'default') ORDER BY timestamp DESC LIMIT 1"
     )
     .bind(entityId, uid)
     .first();
+  if (!authRow) {
+    authRow = await env.AUTHA_DB
+      .prepare(
+        "SELECT key, value, timestamp FROM records WHERE entity_id = ? AND action LIKE '%SYNC%' AND (system_user_id = ? OR system_user_id = 'default') ORDER BY timestamp DESC LIMIT 1"
+      )
+      .bind(entityId, uid)
+      .first();
+  }
 
   // Latest captcha records (login + visa)
   const captchaRows = await env.AUTHA_DB
