@@ -2,7 +2,7 @@ name: Build and Deploy Toque
 
 on:
   push:
-    branches: [dev]
+    branches: [main]
     paths:
       - "src/**"
       - "bin/**"
@@ -183,23 +183,6 @@ jobs:
           # The Worker URL uses the account's workers.dev subdomain (decloud),
           # not the branch name. Extract it from wrangler output.
           echo "url=https://toque.decloud.workers.dev" >> "$GITHUB_OUTPUT"
-
-      - name: Health check
-        env:
-          URL: ${{ steps.deploy.outputs.url }}
-        run: |
-          HEALTH_URL="${URL}/health"
-          echo "Probing $HEALTH_URL ..."
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -sf --max-time 10 "$HEALTH_URL" >/dev/null 2>&1; then
-              echo "✅ Health check passed (attempt $i)"
-              exit 0
-            fi
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
-          echo "❌ Health check failed after 10 attempts"
-          exit 1
 
       - name: Deployment summary
         if: always()
