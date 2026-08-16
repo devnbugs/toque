@@ -470,6 +470,27 @@ function writeStoredGroupId(groupId) {
   });
 }
 
+/**
+ * Update ACTIVE_ENTITY_ID in .env so it matches the token's entity.
+ * The .env value takes priority over entity.json in loadEntity(), so
+ * a stale .env override causes the wrong entity ID to be sent with
+ * the auth token, resulting in 401 errors.
+ */
+function syncEnvEntityId(entityId) {
+  if (!entityId) return;
+  const envPath = ".env";
+  if (!existsSync(envPath)) return;
+  let content = readFileSync(envPath, "utf8");
+  const id = String(entityId);
+  const regex = /^ACTIVE_ENTITY_ID\s*=.*$/m;
+  if (regex.test(content)) {
+    content = content.replace(regex, `ACTIVE_ENTITY_ID=${id}`);
+  } else {
+    content = content.trimEnd() + `\nACTIVE_ENTITY_ID=${id}\n`;
+  }
+  writeFileSync(envPath, content);
+}
+
 async function pullCreds({ entityId, type = "visa", endpoint, quiet = false } = {}) {
   entityId = entityId || process.env.ACTIVE_ENTITY_ID || readEntityId();
 
@@ -532,14 +553,19 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
     const existingEntity = existsSync(entityPath)
       ? JSON.parse(readFileSync(entityPath, "utf8"))
       : {};
+    const resolvedEntityId = capturedEntity.activeEntityId || capturedEntity.entityId || entityId;
     writePrivateJson(entityPath, {
       ...existingEntity,
-      activeEntityId: capturedEntity.activeEntityId || capturedEntity.entityId || entityId,
+      activeEntityId: resolvedEntityId,
       activeEntityTypeId: capturedEntity.activeEntityTypeId || existingEntity.activeEntityTypeId,
       entityId: capturedEntity.entityId || entityId,
       entityTypeId: capturedEntity.entityTypeId || capturedEntity.activeEntityTypeId || existingEntity.entityTypeId,
       systemUserId: context.systemUserId || worker.systemUserId,
     });
+    // Sync .env so ACTIVE_ENTITY_ID matches the token's entity.
+    // A stale .env override causes the wrong entity ID to be sent
+    // with the auth token, resulting in 401 errors.
+    syncEnvEntityId(resolvedEntityId);
   }
 
   return { token, captcha, authPath, captchaPath, entityPath, entityId, context };
