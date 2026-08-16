@@ -1,10 +1,18 @@
 export function buildVisaPayload(payload, groupId, captchaToken) {
   const id = String(groupId);
 
+  // Ensure captchaToken is always a plain string — it may have been
+  // passed as an object { token, entityId, updatedAt } from the
+  // captcha store. The Nusuk API expects recaptchaToken as a string.
+  const token =
+    captchaToken && typeof captchaToken === "object" && typeof captchaToken.token === "string"
+      ? captchaToken.token
+      : captchaToken;
+
   if (payload === undefined || payload === null) {
     return {
       id,
-      ...(captchaToken ? { recaptchaToken: captchaToken } : {}),
+      ...(token ? { recaptchaToken: token } : {}),
     };
   }
 
@@ -15,7 +23,7 @@ export function buildVisaPayload(payload, groupId, captchaToken) {
         return {
           ...parsed,
           id,
-          ...(captchaToken ? { recaptchaToken: parsed?.recaptchaToken || captchaToken } : {}),
+          ...(token ? { recaptchaToken: parsed?.recaptchaToken || token } : {}),
         };
       }
     } catch {}
@@ -23,7 +31,7 @@ export function buildVisaPayload(payload, groupId, captchaToken) {
     return {
       id,
       raw: payload,
-      ...(captchaToken ? { recaptchaToken: captchaToken } : {}),
+      ...(token ? { recaptchaToken: token } : {}),
     };
   }
 
@@ -31,13 +39,13 @@ export function buildVisaPayload(payload, groupId, captchaToken) {
     return {
       ...payload,
       id,
-      ...(captchaToken ? { recaptchaToken: payload?.recaptchaToken || captchaToken } : {}),
+      ...(token ? { recaptchaToken: payload?.recaptchaToken || token } : {}),
     };
   }
 
   return {
     id,
     value: payload,
-    ...(captchaToken ? { recaptchaToken: captchaToken } : {}),
+    ...(token ? { recaptchaToken: token } : {}),
   };
 }

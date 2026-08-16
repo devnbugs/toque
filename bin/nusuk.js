@@ -110,14 +110,19 @@ function readCaptchaToken(type = "visa") {
   if (!p) return null;
   try {
     const data = JSON.parse(readFileSync(p, "utf8"));
-    return (
+    const raw =
       data[type] ||
       data.captchaToken ||
       data.visa ||
       data.login ||
       data.general ||
-      null
-    );
+      null;
+    // The stored value may be a plain string (token) or an object
+    // { token, entityId, updatedAt } — always return just the string.
+    if (raw && typeof raw === "object" && typeof raw.token === "string") {
+      return raw.token;
+    }
+    return typeof raw === "string" ? raw : null;
   } catch {
     return null;
   }
@@ -150,8 +155,13 @@ function parsePayloadOptions(args, { defaultCaptchaType = "visa" } = {}) {
 
 function injectCaptchaToken(payload, captchaToken) {
   if (!captchaToken) return payload;
+  // Ensure we always have a plain string token
+  const token =
+    captchaToken && typeof captchaToken === "object" && typeof captchaToken.token === "string"
+      ? captchaToken.token
+      : captchaToken;
   if (payload === undefined || payload === null) {
-    return { captchaToken, recaptchaToken: captchaToken };
+    return { recaptchaToken: token };
   }
   if (typeof payload === "string") {
     try {
@@ -166,8 +176,7 @@ function injectCaptchaToken(payload, captchaToken) {
   return typeof payload === "object"
     ? {
         ...payload,
-        captchaToken: payload?.captchaToken || captchaToken,
-        recaptchaToken: payload?.recaptchaToken || captchaToken,
+        recaptchaToken: payload?.recaptchaToken || token,
       }
     : payload;
 }
