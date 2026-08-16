@@ -487,10 +487,10 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
   const token = worker.extractToken(context.auth);
   const captchaOptions = context.captcha || {};
   const captchaOrder = type === "login"
-    ? [captchaOptions.login, captchaOptions.latest, captchaOptions.visa]
+    ? [captchaOptions.login, captchaOptions.latest, captchaOptions.visa, captchaOptions.general]
     : type === "general"
-      ? [captchaOptions.latest, captchaOptions.visa, captchaOptions.login]
-      : [captchaOptions.visa, captchaOptions.latest, captchaOptions.login];
+      ? [captchaOptions.general, captchaOptions.latest, captchaOptions.visa, captchaOptions.login]
+      : [captchaOptions.visa, captchaOptions.latest, captchaOptions.login, captchaOptions.general];
   const captcha = captchaOrder.find((entry) => entry?.captchaToken)?.captchaToken || null;
   const authPath = process.env.AUTH_PATH || "auth.json";
   const captchaPath = process.env.CAPTCHA_PATH || "captcha.json";
@@ -614,7 +614,36 @@ async function cmdLogin(args) {
     systemUserId,
   });
   console.log(`\n→ Loading D1 context for system user ${systemUserId}...`);
-  const context = await worker.fetchUserContext(systemUserId);
+  const userContext = await worker.fetchUserContext(systemUserId);
+
+  // fetchUserContext returns { ok, systemUserId, count, entities: [{ entityId, count, latest }] }
+  // Find the entity with the latest AUTH_TOKEN/SYNC record, then fetch its
+  // full context (auth + captcha) via the entity context endpoint.
+  let entityId = null;
+  let latestAuthTs = 0;
+  const entities = userContext.entities || [];
+  for (const ent of entities) {
+    const latest = ent.latest || {};
+    const action = String(latest.action || "").toUpperCase();
+    if (action.includes("AUTH_TOKEN") || action.includes("SYNC")) {
+      const ts = Number(latest.timestamp || 0);
+      if (ts > latestAuthTs) {
+        latestAuthTs = ts;
+        entityId = ent.entityId;
+      }
+    }
+  }
+  // Fallback: if no AUTH_TOKEN found in latest, use the first entity
+  if (!entityId && entities.length > 0) {
+    entityId = entities[0].entityId;
+  }
+
+  let context;
+  if (entityId) {
+    context = await worker.fetchContext(entityId, { refresh: true });
+  } else {
+    context = userContext; // empty context
+  }
   const result = saveContext(context, {
     type: getArg("--type") || "visa",
     worker,
@@ -1207,9 +1236,10 @@ async function cmdApi(args) {
   return cmdReq(requestArgs);
 }
 
-async function fetchGroups({ limit = 10, offset = 0 } = {}) {
+async function fetchGroups({ limit = 10, offset = 0, filterList } = {}) {
   const request = getRequest("group-list");
   const payload = { ...request.payload, limit, offset };
+  if (filterList) payload.filterList = filterList;
   const response = await executeRequest({
     path: request.path,
     method: request.method,
@@ -1225,24 +1255,152 @@ async function fetchGroups({ limit = 10, offset = 0 } = {}) {
 
 async function cmdGroups(args) {
   const [action = "list", ...options] = args;
-  if (action !== "list") throw new Error("Usage: nusuk groups list [--limit 10] [--offset 0] [--raw-json]");
   const getArg = (flag) => {
     const index = options.indexOf(flag);
     return index === -1 ? undefined : options[index + 1];
   };
-  const limit = parsePositiveCount(getArg("--limit"), 10, 100);
-  const offsetText = getArg("--offset") ?? "0";
-  if (limit === null) throw new Error("Group limit must be an integer from 1 to 100");
-  if (!/^\d+$/.test(offsetText) || !Number.isSafeInteger(Number(offsetText))) {
-    throw new Error("Group offset must be a non-negative integer");
-  }
-  const { groups, response } = await fetchGroups({ limit, offset: Number(offsetText) });
-  if (options.includes("--raw-json")) {
-    console.log(JSON.stringify(response.json, null, 2));
+
+  if (action === "list") {
+    const limit = parsePositiveCount(getArg("--limit"), 10, 100);
+    const offsetText = getArg("--offset") ?? "0";
+    if (limit === null) throw new Error("Group limit must be an integer from 1 to 100");
+    if (!/^\d+$/.test(offsetText) || !Number.isSafeInteger(Number(offsetText))) {
+      throw new Error("Group offset must be a non-negative integer");
+    }
+    const { groups, response } = await fetchGroups({ limit, offset: Number(offsetText) });
+    if (options.includes("--raw-json")) {
+      console.log(JSON.stringify(response.json, null, 2));
+      return;
+    }
+    console.log(`Groups (${groups.length}):\n`);
+    console.log(formatGroups(groups));
     return;
   }
-  console.log(`Groups (${groups.length}):\n`);
-  console.log(formatGroups(groups));
+
+  if (action === "detail" || action === "set") {
+    // Fetch all groups (paginated) with optional filters
+    const eaCode = getArg("--ea-code");
+    const stateFilterId = getArg("--state");
+    const limit = parsePositiveCount(getArg("--limit"), 100, 500);
+    if (limit === null) throw new Error("Group limit must be an integer from 1 to 500");
+
+    // Build filter list for the API request
+    const filterList = [];
+    if (eaCode) {
+      filterList.push({ propertyName: "eaCode", operation: "match", propertyValue: eaCode });
+    }
+    if (stateFilterId) {
+      filterList.push({ propertyName: "stateFilterId", operation: "equal", propertyValue: stateFilterId });
+    }
+
+    // Fetch all pages
+    const allGroups = [];
+    const allRawRecords = [];
+    let offset = 0;
+    const pageSize = Math.min(limit, 100);
+    let hasMore = true;
+    while (hasMore && allGroups.length < limit) {
+      const { groups, response } = await fetchGroups({
+        limit: pageSize,
+        offset,
+        filterList: filterList.length > 0 ? filterList : undefined,
+      });
+      allGroups.push(...groups);
+      // Collect raw records for detail display
+      const rawRecords = extractRawRecords(response.json);
+      allRawRecords.push(...rawRecords);
+      hasMore = groups.length === pageSize;
+      offset += pageSize;
+      if (groups.length === 0) break;
+    }
+
+    const capped = allGroups.slice(0, limit);
+    const cappedRaw = allRawRecords.slice(0, limit);
+
+    if (options.includes("--raw-json")) {
+      console.log(JSON.stringify(cappedRaw, null, 2));
+      return;
+    }
+
+    if (capped.length === 0) {
+      const filterDesc = [eaCode && `eaCode=${eaCode}`, stateFilterId && `state=${stateFilterId}`].filter(Boolean).join(", ");
+      console.log(`No groups found${filterDesc ? ` matching ${filterDesc}` : ""}.`);
+      return;
+    }
+
+    // Print detailed table
+    console.log(`\nGroups (${capped.length}${eaCode || stateFilterId ? " filtered" : ""}):\n`);
+    console.log(formatGroupDetails(capped, cappedRaw));
+
+    // Interactive selection — both 'detail' and 'set' prompt to pick a group
+    // and store it as the default group ID. In non-interactive mode, 'set'
+    // auto-selects a single result or accepts --group-id; 'detail' just prints.
+    if (action === "set" || (action === "detail" && canPrompt())) {
+      if (!canPrompt()) {
+        if (action !== "set") return; // detail in non-interactive mode: just print
+        const groupId = getArg("--group-id");
+        if (groupId) {
+          writeStoredGroupId(groupId);
+          console.log(`\n✓ Stored group ID: ${groupId}`);
+          return;
+        }
+        if (capped.length === 1) {
+          writeStoredGroupId(capped[0].id);
+          console.log(`\n✓ Stored group ID: ${capped[0].id} (${capped[0].name})`);
+          return;
+        }
+        console.error("\nMultiple groups found. Pass --group-id <id> or run in an interactive terminal to select.");
+        process.exitCode = 1;
+        return;
+      }
+
+      console.log(`\nSelect a group to set as default:\n`);
+      const selection = parseGroupSelection(await ask(`Choose 1-${capped.length} (or 0 to cancel): `), capped);
+      if (!selection) {
+        console.log("Cancelled.");
+        return;
+      }
+      writeStoredGroupId(selection.id);
+      console.log(`\n✓ Stored group ID: ${selection.id} (${selection.name})`);
+    }
+    return;
+  }
+
+  throw new Error("Usage: nusuk groups <list|detail|set> [options]\n  list   [--limit N] [--offset N] [--raw-json]\n  detail [--ea-code <code>] [--state <id>] [--limit N] [--raw-json]\n  set    [--ea-code <code>] [--state <id>] [--group-id <id>] [--limit N]");
+}
+
+/** Extract raw group records from the API response for detail display. */
+function extractRawRecords(json) {
+  for (const path of [["response", "data", "items"], ["response", "data", "records"], ["response", "data", "results"], ["response", "data", "list"], ["response", "data"], ["data", "items"], ["data", "records"], ["data", "results"], ["data", "list"], ["data"], ["items"], ["records"], ["results"], ["list"], []]) {
+    const candidate = path.reduce((cur, key) => cur?.[key], json);
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
+}
+
+/** Format groups with full details (eaCode, state, status, counts). */
+function formatGroupDetails(groups, rawRecords) {
+  if (!groups.length) return "No groups found.";
+  const width = String(groups.length).length;
+
+  // Discover useful detail fields from raw records
+  const DETAIL_FIELDS = [
+    "eaCode", "stateFilterId", "stateName", "statusName", "status",
+    "mutamerCount", "travelerCount", "totalCount", "visaCount",
+    "submissionDate", "creationDate", "createdDate", "lastUpdated",
+  ];
+
+  return groups.map((group, index) => {
+    const raw = rawRecords[index] || group.raw || {};
+    const lines = [`  ${String(index + 1).padStart(width)}. ${group.name}  (ID: ${group.id})`];
+    for (const field of DETAIL_FIELDS) {
+      const value = raw[field];
+      if (value !== undefined && value !== null && value !== "") {
+        lines.push(`       ${field}: ${value}`);
+      }
+    }
+    return lines.join("\n");
+  }).join("\n");
 }
 
 async function selectGroup() {
@@ -1963,8 +2121,9 @@ function configFilePath() {
 
 /** Known config keys with their default values (mirrors DEFAULT_CONFIG). */
 const CONFIG_KEYS = {
-  "autha.endpoint": "https://autha-worker.decloud.workers.dev",
+  "autha.endpoint": "https://authad.vortex.name.ng",
   "autha.apiToken": "",
+  "autha.signingSecret": "",
   "autha.proxyMode": false,
   "worker.url": "https://toque.decloud.workers.dev",
   "worker.apiKey": "",
@@ -2134,6 +2293,145 @@ async function cmdConfigSync() {
   }
   console.log(`✓ synced ${keys.length} setting(s) to ${workerUrl}`);
 }
+
+/**
+ * cmdSync — sync autha-worker credentials (endpoint, API token, signing secret)
+ * to local config + .env so the CLI and container can pull auth/captcha smoothly.
+ *
+ * Reads values from (in priority order):
+ *   1. CLI flags: --endpoint, --api-token, --signing-secret, --entity, --system-user
+ *   2. Existing ~/.toque/config.json
+ *   3. Environment variables: WORKER_URL, WORKER_API_TOKEN, AUTHA_SIGNING_SECRET
+ *   4. Defaults
+ *
+ * Writes to:
+ *   - ~/.toque/config.json (autha.endpoint, autha.apiToken, autha.signingSecret)
+ *   - .env (WORKER_URL, WORKER_API_TOKEN, AUTHA_SIGNING_SECRET)
+ *
+ * Then verifies by hitting /health and doing a diagnostic context pull.
+ */
+async function cmdSync(args) {
+  const getFlag = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+
+  const endpoint =
+    getFlag("--endpoint") ||
+    process.env.WORKER_URL ||
+    loadConfigFile()["autha.endpoint"] ||
+    CONFIG_KEYS["autha.endpoint"];
+  const apiToken =
+    getFlag("--api-token") ||
+    process.env.WORKER_API_TOKEN ||
+    loadConfigFile()["autha.apiToken"] ||
+    "";
+  const signingSecret =
+    getFlag("--signing-secret") ||
+    process.env.AUTHA_SIGNING_SECRET ||
+    loadConfigFile()["autha.signingSecret"] ||
+    "";
+  const entityId =
+    getFlag("--entity") ||
+    process.env.ACTIVE_ENTITY_ID ||
+    readEntityId() ||
+    "";
+  const systemUserId =
+    getFlag("--system-user") ||
+    process.env.SYSTEM_USER_ID ||
+    "default";
+
+  if (!apiToken) {
+    throw new Error(
+      "API token required. Pass --api-token <token>, set WORKER_API_TOKEN env var, or run:\n" +
+      "  nusuk config set autha.apiToken <token>"
+    );
+  }
+
+  const base = String(endpoint).replace(/\/+$/, "");
+  console.log(`\n┌─ Sync autha-worker credentials`);
+  console.log(`│  endpoint: ${base}`);
+  console.log(`│  apiToken: ${apiToken.slice(0, 12)}...`);
+  console.log(`│  signing:  ${signingSecret ? signingSecret.slice(0, 8) + "..." : "(not set)"}`);
+  console.log(`│  entity:   ${entityId || "(none)"}`);
+  console.log(`│  system:   ${systemUserId}`);
+
+  // ── 1. Verify connectivity (health check) ──────────────────────────
+  console.log(`│  checking /health...`);
+  let healthOk = false;
+  try {
+    const resp = await fetch(`${base}/health`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    const health = await resp.json();
+    if (resp.ok && health.ok) {
+      healthOk = true;
+      console.log(`│  ✓ health: ${health.service} v${health.version} storage=${health.storage}`);
+    } else {
+      console.log(`│  ✗ health failed (${resp.status}): ${health.error || resp.statusText}`);
+    }
+  } catch (err) {
+    console.log(`│  ✗ health unreachable: ${err.message}`);
+  }
+
+  // ── 2. Persist to ~/.toque/config.json ────────────────────────────
+  const local = loadConfigFile();
+  local["autha.endpoint"] = base;
+  local["autha.apiToken"] = apiToken;
+  if (signingSecret) local["autha.signingSecret"] = signingSecret;
+  if (entityId) local["nusuk.activeEntityId"] = entityId;
+  local["nusuk.systemUserId"] = systemUserId;
+  saveConfigFile(local);
+  console.log(`│  ✓ saved config to ${configFilePath()}`);
+
+  // ── 3. Persist to .env (for container + CLI env-var fallback) ──────
+  const envPath = resolve(process.cwd(), ".env");
+  let envContent = "";
+  if (existsSync(envPath)) {
+    envContent = readFileSync(envPath, "utf8");
+  }
+  const envLines = envContent.split("\n");
+  const envKeys = {
+    WORKER_URL: base,
+    WORKER_API_TOKEN: apiToken,
+  };
+  if (signingSecret) envKeys.AUTHA_SIGNING_SECRET = signingSecret;
+  if (entityId) envKeys.ACTIVE_ENTITY_ID = entityId;
+  if (systemUserId !== "default") envKeys.SYSTEM_USER_ID = systemUserId;
+
+  for (const [key, value] of Object.entries(envKeys)) {
+    const regex = new RegExp(`^${key}=.*$`, "m");
+    if (regex.test(envContent)) {
+      envContent = envContent.replace(regex, `${key}=${value}`);
+    } else {
+      envContent = envContent.trimEnd() + `\n${key}=${value}`;
+    }
+  }
+  writeFileSync(envPath, envContent.trimStart() + "\n", { mode: 0o600 });
+  console.log(`│  ✓ saved env to ${envPath}`);
+
+  // ── 4. Diagnostic pull (if entity ID is available) ────────────────
+  if (entityId) {
+    console.log(`│  pulling context for entity ${entityId}...`);
+    try {
+      const worker = new AuthaWorker({ endpoint: base, apiToken, entityId, systemUserId });
+      const context = await worker.fetchContext(entityId, { refresh: true });
+      const token = worker.extractToken(context.auth);
+      const captcha = context.captcha || {};
+      const hasCaptcha = Object.values(captcha).some((c) => c?.captchaToken);
+      console.log(`│  ${token ? "✓" : "✗"} auth token  ${token ? token.slice(0, 24) + "..." : "(none found)"}`);
+      console.log(`│  ${hasCaptcha ? "✓" : "✗"} captcha     ${hasCaptcha ? "(available)" : "(none found)"}`);
+    } catch (err) {
+      console.log(`│  ✗ pull failed: ${err.message}`);
+    }
+  } else {
+    console.log(`│  (skip pull — no entity ID set)`);
+  }
+
+  console.log(`└─ ${healthOk ? "sync complete" : "sync complete (health check failed)"}`);
+  if (!healthOk) process.exitCode = 1;
+}
+
 function help(topic = "") {
   if (topic === "captcha") {
     console.log(`
@@ -2182,9 +2480,12 @@ Common tasks:
   request <path>        Send a custom API request
   api <name>            Run a saved request from the catalog
   groups list           Show group names and IDs
+  groups detail         Show full group details (filter by --ea-code, --state)
+  groups set            Select a group and set it as the default group ID
   schedule              Schedule a request
   workflow              Manage Cloudflare Workflow instances (status, terminate)
   config                Memorized & configurable options (get, set, list, sync)
+  sync                  Sync autha-worker credentials (endpoint, API token, signing secret)
   sync-time             Sync system clock to accurate network time
   bench [count]         Measure request latency
 
@@ -2199,6 +2500,8 @@ Examples:
   nusuk whoami
   nusuk login-auto --username user@email.com --password pass123
   nusuk verify-login --transaction-id <id> --otp 1234
+  nusuk config set autha.apiToken <token>
+  nusuk sync --api-token <token> --signing-secret <secret>
   nusuk refresh-token
   nusuk info
   nusuk send 12345
@@ -2344,6 +2647,9 @@ async function main() {
       break;
     case "config":
       await cmdConfig(args);
+      break;
+    case "sync":
+      await cmdSync(args);
       break;
     case "help":
       help(args[0] || "");

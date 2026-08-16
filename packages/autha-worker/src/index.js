@@ -400,8 +400,8 @@ async function handleLatestToken(request, env, entityId) {
     latestAuthToken: {
       key: row.key,
       timestamp: row.timestamp,
-      token: parsed.token || null,
-      tokenType: parsed.tokenType ?? null,
+      token: extractToken(parsed) || null,
+      tokenType: parsed.tokenType ?? parsed.payload?.tokenType ?? null,
     },
   });
 }
@@ -446,8 +446,8 @@ async function handleEntityContext(request, env, entityId, url) {
   const captcha = { visa: null, login: null, general: null };
   for (const row of captchaRows.results || []) {
     const parsed = safeParse(row.value);
-    const token = parsed.captchaToken || parsed.token || "";
-    const type = (parsed.captchaType || classifyCaptchaType(parsed, token)).toLowerCase();
+    const token = parsed.captchaToken || parsed.payload?.captchaToken || parsed.token || parsed.payload?.token || "";
+    const type = (parsed.captchaType || parsed.payload?.captchaType || classifyCaptchaType(parsed, token)).toLowerCase();
     const entry = {
       key: row.key,
       timestamp: row.timestamp,
@@ -464,8 +464,8 @@ async function handleEntityContext(request, env, entityId, url) {
     ? {
         key: authRow.key,
         timestamp: authRow.timestamp,
-        token: safeParse(authRow.value).token || null,
-        tokenType: safeParse(authRow.value).tokenType ?? null,
+        token: extractToken(safeParse(authRow.value)) || null,
+        tokenType: safeParse(authRow.value).tokenType ?? safeParse(authRow.value).payload?.tokenType ?? null,
       }
     : null;
 
@@ -528,6 +528,16 @@ function safeParse(value) {
   } catch {
     return {};
   }
+}
+
+/**
+ * Extract an auth token from a stored record. The extension stores the
+ * token at `payload.token` (nested), but older records may have it at
+ * the top level. Check both paths.
+ */
+function extractToken(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  return parsed.token || parsed.userToken || parsed.payload?.token || parsed.payload?.userToken || null;
 }
 
 function dbOrError(env) {

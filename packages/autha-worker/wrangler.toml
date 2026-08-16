@@ -1,12 +1,17 @@
 name = "autha-worker"
 main = "src/index.js"
-compatibility_date = "2024-12-01"
+compatibility_date = "2026-08-12"
+
+# Custom domain
+routes = [
+  { pattern = "authad.vortex.name.ng", custom_domain = true }
+]
 
 # D1 binding for token/record storage
 [[d1_databases]]
 binding = "AUTHA_DB"
-database_name = "autha-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "autha_db"
+database_id = "15ee205b-5083-42dd-a464-505dc8fd566f"
 
 # Secrets (set via `wrangler secret put`):
 #   AUTHA_API_TOKEN       — Bearer token for API auth

@@ -14,7 +14,7 @@
 import { readFileSync } from "fs";
 import { parseJwt } from "./jwt.js";
 
-const DEFAULT_ENDPOINT = "https://autha-worker.decloud.workers.dev";
+const DEFAULT_ENDPOINT = "https://authad.vortex.name.ng";
 const CAPTCHA_TYPES = new Set(["visa", "login", "general"]);
 
 export class AuthaWorker {

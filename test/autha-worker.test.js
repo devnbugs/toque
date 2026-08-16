@@ -283,6 +283,47 @@ test("entity context endpoint returns latest auth token", async () => {
   assert.equal(json.auth.tokenType, 3);
 });
 
+test("entity context extracts token from nested payload.token (extension format)", async () => {
+  const d1 = createFakeD1();
+  const env = { AUTHA_DB: d1, AUTHA_API_TOKEN: API_TOKEN, AUTHA_SIGNING_SECRET: SIGNING_SECRET };
+  // Upload an auth token in the format the browser extension sends:
+  // token nested inside payload.token, not at the top level.
+  const record = {
+    action: "NUSUK_AUTHA_AUTH_TOKEN",
+    source: "REQUEST_AUTH",
+    timestamp: Date.now(),
+    entityId: "525513",
+    activeEntityId: "525513",
+    entityTypeId: "1",
+    activeEntityTypeId: "1",
+    payload: {
+      token: "Bearer eyJhbGc.nested.token",
+      url: "/eh/public/app-version",
+      exp: 1786906046,
+    },
+  };
+  await fetchWorker(makeUploadRequest(record, { apiToken: API_TOKEN, signingSecret: SIGNING_SECRET }), env);
+
+  // Query context — should find the token in payload.token
+  const req = new Request("https://autha-worker.test/api/entity/525513/context?systemUserId=default", {
+    headers: { "Authorization": `Bearer ${API_TOKEN}` },
+  });
+  const res = await fetchWorker(req, env);
+  const json = await res.json();
+  assert.equal(res.status, 200);
+  assert.ok(json.auth, "auth should be present");
+  assert.equal(json.auth.token, "Bearer eyJhbGc.nested.token");
+
+  // Also test the /entity/:id/token/latest endpoint
+  const req2 = new Request("https://autha-worker.test/entity/525513/token/latest", {
+    headers: { "Authorization": `Bearer ${API_TOKEN}` },
+  });
+  const res2 = await fetchWorker(req2, env);
+  const json2 = await res2.json();
+  assert.equal(res2.status, 200);
+  assert.equal(json2.latestAuthToken.token, "Bearer eyJhbGc.nested.token");
+});
+
 test("entity context endpoint returns captcha tokens by type", async () => {
   const d1 = createFakeD1();
   const env = { AUTHA_DB: d1, AUTHA_API_TOKEN: API_TOKEN, AUTHA_SIGNING_SECRET: SIGNING_SECRET };

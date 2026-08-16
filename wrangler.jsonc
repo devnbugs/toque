@@ -19,7 +19,7 @@
     }
   },
   "vars": {
-    "WORKER_URL": "https://autha-worker.decloud.workers.dev",
+    "WORKER_URL": "https://authad.vortex.name.ng",
     "TOQUE_WORKER_URL": "https://toque.decloud.workers.dev"
   },
   "services": [
