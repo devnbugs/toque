@@ -491,7 +491,30 @@ async function handleEntityContext(request, env, entityId, url) {
       }
     : null;
 
-  return jsonResponse({ ok: true, entityId, auth, captcha });
+  // Extract entity metadata (entityTypeId, activeEntityTypeId) from the
+  // auth/SYNC record. USER_TOKEN (type 5) JWTs carry no entity claims, so
+  // the CLI relies on these fields to set the activeentitytypeid header.
+  // If the auth record lacks them, fall back to the latest SYNC record.
+  let entityTypeId = authParsed?.entityTypeId ?? authParsed?.activeEntityTypeId ?? null;
+  let activeEntityTypeId = authParsed?.activeEntityTypeId ?? entityTypeId;
+  if (!entityTypeId || !activeEntityTypeId) {
+    const syncRow = await env.AUTHA_DB
+      .prepare(
+        "SELECT value FROM records WHERE entity_id = ? AND action LIKE '%SYNC%' AND (system_user_id = ? OR system_user_id = 'default') ORDER BY timestamp DESC LIMIT 1"
+      )
+      .bind(entityId, uid)
+      .first();
+    if (syncRow) {
+      const syncParsed = safeParse(syncRow.value);
+      entityTypeId = entityTypeId || syncParsed?.entityTypeId || syncParsed?.activeEntityTypeId || null;
+      activeEntityTypeId = activeEntityTypeId || syncParsed?.activeEntityTypeId || entityTypeId || null;
+    }
+  }
+  const entity = entityTypeId || activeEntityTypeId
+    ? { entityId, activeEntityId: entityId, entityTypeId: entityTypeId || null, activeEntityTypeId: activeEntityTypeId || null }
+    : {};
+
+  return jsonResponse({ ok: true, entityId, auth, captcha, entity });
 }
 
 async function handleUserContext(request, env, systemUserId) {

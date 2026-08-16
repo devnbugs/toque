@@ -476,17 +476,29 @@ function writeStoredGroupId(groupId) {
  * a stale .env override causes the wrong entity ID to be sent with
  * the auth token, resulting in 401 errors.
  */
-function syncEnvEntityId(entityId) {
+function syncEnvEntityId(entityId, entityTypeId) {
   if (!entityId) return;
   const envPath = ".env";
   if (!existsSync(envPath)) return;
   let content = readFileSync(envPath, "utf8");
   const id = String(entityId);
-  const regex = /^ACTIVE_ENTITY_ID\s*=.*$/m;
-  if (regex.test(content)) {
-    content = content.replace(regex, `ACTIVE_ENTITY_ID=${id}`);
+  const idRegex = /^ACTIVE_ENTITY_ID\s*=.*$/m;
+  if (idRegex.test(content)) {
+    content = content.replace(idRegex, `ACTIVE_ENTITY_ID=${id}`);
   } else {
     content = content.trimEnd() + `\nACTIVE_ENTITY_ID=${id}\n`;
+  }
+  // Also sync ACTIVE_ENTITY_TYPE_ID so the activeentitytypeid header is
+  // sent. USER_TOKEN (type 5) JWTs carry no entity claims, so without
+  // this the Nusuk API returns 401.
+  if (entityTypeId) {
+    const tid = String(entityTypeId);
+    const tidRegex = /^ACTIVE_ENTITY_TYPE_ID\s*=.*$/m;
+    if (tidRegex.test(content)) {
+      content = content.replace(tidRegex, `ACTIVE_ENTITY_TYPE_ID=${tid}`);
+    } else {
+      content = content.trimEnd() + `\nACTIVE_ENTITY_TYPE_ID=${tid}\n`;
+    }
   }
   writeFileSync(envPath, content);
 }
@@ -565,7 +577,11 @@ function saveContext(context, { type = "visa", worker, quiet = false } = {}) {
     // Sync .env so ACTIVE_ENTITY_ID matches the token's entity.
     // A stale .env override causes the wrong entity ID to be sent
     // with the auth token, resulting in 401 errors.
-    syncEnvEntityId(resolvedEntityId);
+    // Also sync ACTIVE_ENTITY_TYPE_ID so the activeentitytypeid header
+    // is sent (required by the Nusuk API; USER_TOKEN type 5 JWTs lack
+    // entity claims).
+    const resolvedEntityTypeId = capturedEntity.activeEntityTypeId || capturedEntity.entityTypeId || existingEntity.activeEntityTypeId || existingEntity.entityTypeId;
+    syncEnvEntityId(resolvedEntityId, resolvedEntityTypeId);
   }
 
   return { token, captcha, authPath, captchaPath, entityPath, entityId, context };
@@ -597,8 +613,18 @@ async function cmdWhoami(args) {
   }
   const p = jwt.payload;
   const authInfo = parsed?.response?.data?.authInfo || {};
-  const entityId = authInfo.entityId || p.defaultEntityId || p.entities?.[0]?.entityId;
-  const entityTypeId = authInfo.entityTypeId || p.defaultEntityTypeId || p.entities?.[0]?.entityTypeId;
+  // USER_TOKEN (type 5) JWTs carry no entity claims, so fall back to
+  // entity.json and .env for entityId/entityTypeId.
+  let entityId = authInfo.entityId || p.defaultEntityId || p.entities?.[0]?.entityId;
+  let entityTypeId = authInfo.entityTypeId || p.defaultEntityTypeId || p.entities?.[0]?.entityTypeId;
+  const entityPath = process.env.ENTITY_CONFIG_PATH || "entity.json";
+  try {
+    const entityFile = JSON.parse(readFileSync(entityPath, "utf8"));
+    entityId = entityId || entityFile.activeEntityId || entityFile.entityId;
+    entityTypeId = entityTypeId || entityFile.activeEntityTypeId || entityFile.entityTypeId;
+  } catch { /* ignore */ }
+  entityId = entityId || process.env.ACTIVE_ENTITY_ID;
+  entityTypeId = entityTypeId || process.env.ACTIVE_ENTITY_TYPE_ID;
   const tokenTypeMap = { 2: "TEMP", 3: "AUTH", 4: "REFRESH", 5: "USER" };
   const tokenTypeLabel = tokenTypeMap[p.tokenType] || p.tokenType;
 
@@ -607,7 +633,7 @@ async function cmdWhoami(args) {
   console.log(`│  name        ${p.name || p.nameAr || "unknown"}`);
   console.log(`│  userId      ${p.userId || p.userIdStr || "unknown"}`);
   console.log(`│  userType    ${p.userType ?? "unknown"}`);
-  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (not accepted by API — run: nusuk verify-login --otp <code>)" : ""}`);
+  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (entity from config)" : ""}`);
   console.log(`│  entityId    ${entityId || "none"}`);
   console.log(`│  entityType  ${entityTypeId || "none"}`);
   if (p.entities?.length) {
