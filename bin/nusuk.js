@@ -2141,24 +2141,26 @@ async function cmdSendVisa(args) {
       console.warn(`  captcha refresh failed: ${e.message}`);
     }
     if (!captcha) {
-      captcha = readCaptchaToken(captchaType);
-      if (captcha) {
-        console.warn("  worker has no new captcha — reusing captcha.json");
-      }
-    }
-    if (!captcha) {
-      // Fall back to captcha solver (CapSolver default, or CapMonster if
-      // CAPTCHA_PROVIDER=capmonster). This ensures send-visa works even
-      // when the extension hasn't captured a captcha token.
-      console.log("  no worker/captcha.json captcha — solving via captcha solver...");
+      // Worker has no fresh captcha. Solve a new one via CapMonster/CapSolver
+      // instead of reusing a potentially stale captcha.json token.
+      // reCAPTCHA tokens expire after ~2 minutes, so a stale token causes
+      // "Invalid Captcha" errors from the Nusuk API.
+      console.log("  worker has no new captcha — solving via captcha solver...");
       try {
         captcha = await solveCaptchaForVisa(captchaType);
         writeCaptchaToken(captcha, normalizeCaptchaType(captchaType));
         console.log(`  captcha solved and saved to captcha.json`);
       } catch (e) {
         console.error(`  captcha solver failed: ${e.message}`);
-        process.exitCode = 1;
-        return;
+        // Last resort: try the stale captcha.json token
+        captcha = readCaptchaToken(captchaType);
+        if (captcha) {
+          console.warn("  solver failed — falling back to captcha.json (may be stale)");
+        } else {
+          console.error(`  no captcha available — aborting`);
+          process.exitCode = 1;
+          return;
+        }
       }
     }
 
