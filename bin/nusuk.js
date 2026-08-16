@@ -581,7 +581,7 @@ async function cmdWhoami(args) {
   console.log(`│  name        ${p.name || p.nameAr || "unknown"}`);
   console.log(`│  userId      ${p.userId || p.userIdStr || "unknown"}`);
   console.log(`│  userType    ${p.userType ?? "unknown"}`);
-  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (no entity claims — run verify-login)" : ""}`);
+  console.log(`│  tokenType   ${tokenTypeLabel}${p.tokenType === 3 ? " (has entity claims)" : p.tokenType === 5 ? " (accepted with entity header — run verify-login for full AUTH_TOKEN)" : ""}`);
   console.log(`│  entityId    ${entityId || "none"}`);
   console.log(`│  entityType  ${entityTypeId || "none"}`);
   if (p.entities?.length) {
@@ -743,7 +743,10 @@ async function cmdAutoLogin(args) {
     // Step 4: Save the JWT token if login succeeded
     // The login response has two paths:
     //   - trustedDevice=true:  response.data.authInfo.{token,userToken,refreshToken,permsToken}
-    //     → userToken is the AUTH_TOKEN (type 3) with entity claims — save it.
+    //     → userToken is a USER_TOKEN (type 5) — it works for API requests
+    //       when the activeentityid header is set, but lacks entity claims
+    //       in the JWT. Save it; the entity ID comes from entity.json/.env.
+    //       Run `nusuk verify-login` to upgrade to an AUTH_TOKEN (type 3).
     //   - trustedDevice=false: response.data.token is a TEMP_TOKEN (type 2),
     //     authInfo is null, OTP is required.
     //     → Do NOT save the temp token as userToken — it lacks entity claims
@@ -822,12 +825,29 @@ async function cmdVerifyLogin(args) {
     const i = args.indexOf(flag);
     return i !== -1 ? args[i + 1] : undefined;
   };
-  const transactionId = getArg("--transaction-id") || getArg("--transaction");
+  let transactionId = getArg("--transaction-id") || getArg("--transaction");
   const otpCode = getArg("--otp") || getArg("--code");
   const system = getArg("--system") || "1";
   const module = getArg("--module") || "1";
 
-  if (!transactionId) throw new Error("Transaction ID is required. Pass --transaction-id <id> (from login-auto response)");
+  // Auto-extract the transaction ID from the USER_TOKEN (type 5) JWT in
+  // auth.json if not provided explicitly. The Nusuk login response embeds
+  // TRANSACTION_ID in the JWT payload.
+  if (!transactionId) {
+    try {
+      const authPath = process.env.AUTH_PATH || "auth.json";
+      const existing = JSON.parse(readFileSync(authPath, "utf8"));
+      const token = existing?.response?.data?.authInfo?.userToken;
+      const jwt = token ? parseJwt(token) : null;
+      const tid = jwt?.payload?.TRANSACTION_ID;
+      if (tid) {
+        transactionId = tid;
+        console.log(`  transaction : ${transactionId} (extracted from JWT)`);
+      }
+    } catch { /* ignore */ }
+  }
+
+  if (!transactionId) throw new Error("Transaction ID is required. Pass --transaction-id <id> (or ensure auth.json has a USER_TOKEN with TRANSACTION_ID claim)");
   if (!otpCode) throw new Error("OTP code is required. Pass --otp <4-digit-code>");
 
   console.log(`Verifying OTP...`);

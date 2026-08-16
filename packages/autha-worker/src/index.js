@@ -460,12 +460,15 @@ async function handleEntityContext(request, env, entityId, url) {
     else if (!captcha.general) captcha.general = entry;
   }
 
+  const authParsed = authRow ? safeParse(authRow.value) : null;
   const auth = authRow
     ? {
         key: authRow.key,
         timestamp: authRow.timestamp,
-        token: extractToken(safeParse(authRow.value)) || null,
-        tokenType: safeParse(authRow.value).tokenType ?? safeParse(authRow.value).payload?.tokenType ?? null,
+        token: extractToken(authParsed) || null,
+        tokenType: authParsed.tokenType ?? authParsed.payload?.tokenType ?? null,
+        refreshToken: authParsed.refreshToken || authParsed.payload?.refreshToken || null,
+        permsToken: authParsed.permsToken || authParsed.payload?.permsToken || null,
       }
     : null;
 

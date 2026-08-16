@@ -60,13 +60,25 @@ export class Nusuk {
     // carries defaultEntityId/defaultEntityTypeId/entities)
     const jwt = parseJwt(token);
     // Validate token type — only AUTH_TOKEN (type 3) has entity claims.
-    // TEMP_TOKEN (2) and USER_TOKEN (5) lack entity claims and will cause
-    // authenticated requests to fail. Warn the user to run verify-login.
-    if (jwt?.payload?.tokenType && jwt.payload.tokenType !== 3) {
-      const tokenTypeMap = { 2: "TEMP", 4: "REFRESH", 5: "USER" };
+    // TEMP_TOKEN (2) lacks entity claims and will cause authenticated
+    // requests to fail — reject it. USER_TOKEN (type 5) also lacks entity
+    // claims in the JWT, but the Nusuk API accepts it when the entity ID
+    // is provided via the activeentityid header (the browser uses this
+    // flow). Allow type 5 with a warning, and rely on entity.json/.env
+    // for the entity ID.
+    if (jwt?.payload?.tokenType && jwt.payload.tokenType !== 3 && jwt.payload.tokenType !== 5) {
+      const tokenTypeMap = { 2: "TEMP", 4: "REFRESH" };
       const label = tokenTypeMap[jwt.payload.tokenType] || jwt.payload.tokenType;
       throw new Error(
         `auth token is a ${label}_TOKEN (type ${jwt.payload.tokenType}), not an AUTH_TOKEN (type 3) — run \`nusuk verify-login\` to get the full auth token with entity claims`
+      );
+    }
+    if (jwt?.payload?.tokenType === 5) {
+      console.warn(
+        `Warning: auth token is a USER_TOKEN (type 5), not an AUTH_TOKEN (type 3). ` +
+        `The Nusuk API accepts it with the activeentityid header. ` +
+        `Entity ID will be loaded from entity.json/.env. ` +
+        `Run \`nusuk verify-login\` to get the full AUTH_TOKEN with entity claims.`
       );
     }
     const entityId = authInfo?.entityId || jwt?.payload?.defaultEntityId || jwt?.payload?.entities?.[0]?.entityId;
@@ -79,7 +91,6 @@ export class Nusuk {
     }
     return this;
   }
-
   setEntityId(entityId) {
     if (entityId) {
       this.entityId = String(entityId);
